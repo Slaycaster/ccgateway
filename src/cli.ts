@@ -5,9 +5,11 @@ import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { loadConfig, saveConfig } from "./config.js";
+import { loadConfig, saveConfig, getCcgHome } from "./config.js";
 import type { AgentConfig } from "./config.js";
 import { AgentRegistry } from "./agents.js";
+import { SessionManager } from "./sessions.js";
+import { SkillManager } from "./skills.js";
 
 // ── Read version from package.json ──────────────────────────────────────────
 
@@ -33,10 +35,10 @@ const stubs = [
   { name: "start", desc: "Start the ccgateway daemon" },
   { name: "stop", desc: "Stop the ccgateway daemon" },
   { name: "status", desc: "Show daemon and agent status" },
-  { name: "sessions", desc: "Manage sessions" },
+  // sessions: implemented below
   { name: "send", desc: "Send a message to an agent" },
   { name: "chat", desc: "Interactive chat with an agent" },
-  { name: "skills", desc: "Manage skills" },
+  // skills: implemented below
   { name: "heartbeat", desc: "Manage heartbeat schedules" },
   { name: "migrate", desc: "Run database migrations" },
   { name: "init", desc: "Initialize ccgateway configuration" },
@@ -199,6 +201,102 @@ agentsCmd
         console.log(`    - ${err}`);
       }
     }
+  });
+
+// ── sessions subcommand ───────────────────────────────────────────────────
+
+const sessionsCmd = program
+  .command("sessions")
+  .description("Manage sessions");
+
+sessionsCmd
+  .command("list")
+  .description("List sessions with agent, key, message count, last activity")
+  .option("--agent <id>", "Filter by agent id")
+  .action(async (opts) => {
+    const mgr = new SessionManager(getCcgHome());
+    const sessions = await mgr.listSessions(opts.agent);
+
+    if (sessions.length === 0) {
+      console.log("No sessions found.");
+      return;
+    }
+
+    const header = ["Agent", "Session Key", "Messages", "Last Activity"];
+    const rows = sessions.map((s) => [
+      s.agentId,
+      s.sessionKey,
+      String(s.messageCount),
+      new Date(s.lastActivity).toISOString(),
+    ]);
+
+    const widths = header.map((h, i) =>
+      Math.max(h.length, ...rows.map((r) => r[i].length)),
+    );
+
+    const formatRow = (cols: string[]) =>
+      cols.map((c, i) => c.padEnd(widths[i])).join("  ");
+
+    console.log(formatRow(header));
+    console.log(widths.map((w) => "-".repeat(w)).join("  "));
+    for (const row of rows) {
+      console.log(formatRow(row));
+    }
+  });
+
+sessionsCmd
+  .command("inspect <sessionKey>")
+  .description("Show messages in a session (most recent 20)")
+  .action(async (sessionKey: string) => {
+    const parts = sessionKey.split(":");
+    if (parts.length < 3) {
+      console.error("Error: Session key must be in format agentId:source:sourceId");
+      process.exitCode = 1;
+      return;
+    }
+
+    const agentId = parts[0];
+    const mgr = new SessionManager(getCcgHome());
+    const messages = await mgr.readHistory(agentId, sessionKey);
+
+    if (messages.length === 0) {
+      console.log("No messages found for this session.");
+      return;
+    }
+
+    // Show the most recent 20 messages
+    const recent = messages.slice(-20);
+    const skipped = messages.length - recent.length;
+
+    if (skipped > 0) {
+      console.log(`... ${skipped} older message(s) omitted ...\n`);
+    }
+
+    for (const msg of recent) {
+      const time = new Date(msg.ts).toISOString();
+      const src = msg.source ? ` [${msg.source}]` : "";
+      const user = msg.sourceUser ? ` (${msg.sourceUser})` : "";
+      console.log(`[${time}] ${msg.role}${src}${user}:`);
+      console.log(`  ${msg.content}`);
+      console.log();
+    }
+  });
+
+sessionsCmd
+  .command("reset <sessionKey>")
+  .description("Archive and reset a session")
+  .action(async (sessionKey: string) => {
+    const parts = sessionKey.split(":");
+    if (parts.length < 3) {
+      console.error("Error: Session key must be in format agentId:source:sourceId");
+      process.exitCode = 1;
+      return;
+    }
+
+    const agentId = parts[0];
+    const mgr = new SessionManager(getCcgHome());
+    await mgr.resetSession(agentId, sessionKey);
+    console.log(`Session "${sessionKey}" has been archived and reset.`);
   });
 
 // ── Run ─────────────────────────────────────────────────────────────────────
