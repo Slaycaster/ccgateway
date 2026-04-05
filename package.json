@@ -3,12 +3,33 @@
   "version": "0.1.0",
   "description": "Multi-agent orchestration layer built on Claude Code CLI",
   "type": "module",
+  "license": "MIT",
+  "author": "Denimar Fernandez",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Slaycaster/ccgateway"
+  },
+  "keywords": ["claude", "claude-code", "agents", "orchestration", "gateway", "cli", "clawdbot", "openclaw", "anthropic"],
+  "main": "./dist/config.js",
+  "types": "./dist/config.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/config.js",
+      "types": "./dist/config.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
   "bin": {
     "ccg": "./dist/cli.js",
     "ccg-dev": "./bin/ccg-dev.sh"
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "dev": "tsx src/cli.ts",
     "lint": "tsc --noEmit",
     "test": "vitest run"
