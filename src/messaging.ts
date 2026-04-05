@@ -92,13 +92,26 @@ export class CrossAgentMessenger {
           attachments: [],
         });
 
-        // Post the agent's response back to their channel for visibility
         if (plugin && typeof plugin.sendToChannel === "function") {
-          await (plugin.sendToChannel as (
+          const sendToChannel = plugin.sendToChannel as (
             channelId: string,
             botId: string,
             content: string,
-          ) => Promise<void>)(binding.channel, binding.bot, response);
+          ) => Promise<void>;
+
+          // Post the agent's response in their own channel for visibility
+          await sendToChannel(binding.channel, binding.bot, response);
+
+          // Post the response back to the sender's channel so they see the reply.
+          // Bot messages are ignored by the gateway handler, so this won't loop.
+          if (fromAgentId) {
+            const senderBinding = this.bindings.find(
+              (b) => b.agent === fromAgentId && b.gateway === binding.gateway,
+            );
+            if (senderBinding && senderBinding.channel !== binding.channel) {
+              await sendToChannel(senderBinding.channel, binding.bot, response);
+            }
+          }
         }
       }
       return;
