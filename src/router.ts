@@ -2,7 +2,10 @@ import type { AgentRegistry } from "./agents.js";
 import type { SessionManager } from "./sessions.js";
 import type { ContextBuilder } from "./context.js";
 import type { CCSpawner } from "./spawner.js";
-import type { IncomingMessage, BindingConfig } from "./types.js";
+import type { IncomingMessage, Attachment, BindingConfig } from "./types.js";
+import { writeFile, mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // ── MessageRouter ─────────────────────────────────────────────────────────
 
@@ -75,25 +78,48 @@ export class MessageRouter {
       sourceMessageId: message.from.messageId,
     });
 
-    // 4. Build context
+    // 4. Download attachments (if any) so Claude can read them
+    let attachmentDir: string | undefined;
+    let messageContent = message.content;
+    if (message.attachments.length > 0) {
+      const result = await this.downloadAttachments(
+        message.attachments,
+        agent.workspace,
+      );
+      attachmentDir = result.dir;
+      if (result.paths.length > 0) {
+        const fileList = result.paths
+          .map((p) => `  - ${p}`)
+          .join("\n");
+        messageContent += `\n\n[Attached files — use the Read tool to view them]\n${fileList}`;
+      }
+    }
+
+    // 5. Build context
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
-    // 5. Spawn claude --print
+    // 6. Spawn claude --print
     const result = await this.spawner.spawn({
       workspace: agent.workspace,
-      message: message.content,
+      message: messageContent,
       systemPrompt,
       model: agent.model,
       allowedTools: agent.allowedTools,
       ...(agent.timeoutMs ? { timeoutMs: agent.timeoutMs } : {}),
     });
 
-    // 6. Handle failure: append error to session and throw
+    // 7. Clean up attachment temp dir
+    if (attachmentDir) {
+      rm(attachmentDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    // 8. Handle failure: append error to session and throw
     if (result.exitCode !== 0) {
       const isTimeout = result.exitCode === 124;
+      const stderrHint = result.stderr ? `\n\nDetails: ${result.stderr.slice(0, 500)}` : "";
       const errorContent = isTimeout
         ? "The task timed out — it took longer than the allowed time. Try breaking it into smaller steps, or increase the agent's `timeoutMs` setting."
-        : result.response || `Spawner failed with exit code ${result.exitCode}`;
+        : (result.response || `Spawner failed with exit code ${result.exitCode}`) + stderrHint;
       await this.sessions.appendMessage(agentId, sessionKey, {
         role: "assistant",
         content: `[error] ${errorContent}`,
@@ -103,7 +129,7 @@ export class MessageRouter {
       throw new Error(errorContent);
     }
 
-    // 7. Append assistant response to session
+    // 9. Append assistant response to session
     await this.sessions.appendMessage(agentId, sessionKey, {
       role: "assistant",
       content: result.response,
@@ -111,7 +137,7 @@ export class MessageRouter {
       tokens: result.tokensEstimate,
     });
 
-    // 8. Return response text
+    // 10. Return response text
     return result.response;
   }
 
@@ -134,5 +160,37 @@ export class MessageRouter {
    */
   getPrimaryBinding(agentId: string): BindingConfig | undefined {
     return this.bindings.find((b) => b.agent === agentId);
+  }
+
+  /**
+   * Download attachments to a temp directory and return their local paths.
+   */
+  private async downloadAttachments(
+    attachments: Attachment[],
+    workspace: string,
+  ): Promise<{ dir: string; paths: string[] }> {
+    const dir = join(tmpdir(), `ccg-attach-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+
+    const paths: string[] = [];
+
+    for (const att of attachments) {
+      if (!att.url) continue;
+
+      try {
+        const resp = await fetch(att.url);
+        if (!resp.ok) continue;
+
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        const filename = att.filename || `attachment-${paths.length}`;
+        const filePath = join(dir, filename);
+        await writeFile(filePath, buffer);
+        paths.push(filePath);
+      } catch {
+        // Skip failed downloads
+      }
+    }
+
+    return { dir, paths };
   }
 }

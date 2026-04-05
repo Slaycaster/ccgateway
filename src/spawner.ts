@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 
 export interface SpawnResult {
   response: string;
+  stderr: string;
   exitCode: number;
   tokensEstimate: { in: number; out: number };
 }
@@ -67,6 +68,7 @@ export class CCSpawner {
         },
         (error, stdout, stderr) => {
           const response = (stdout || "").toString();
+          const stderrStr = (stderr || "").toString();
           const exitCode = error ? (error as NodeJS.ErrnoException & { code?: number | string }).code === "ETIMEDOUT"
             ? 124
             : (error as any).status ?? 1
@@ -77,6 +79,7 @@ export class CCSpawner {
 
           resolve({
             response,
+            stderr: stderrStr,
             exitCode,
             tokensEstimate: {
               in: Math.ceil(inputChars / 4),

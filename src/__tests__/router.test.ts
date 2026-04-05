@@ -93,6 +93,7 @@ function createMockContext(): ContextBuilder {
 function createMockSpawner(result?: Partial<SpawnResult>): CCSpawner {
   const defaultResult: SpawnResult = {
     response: "I can help with that!",
+    stderr: "",
     exitCode: 0,
     tokensEstimate: { in: 50, out: 10 },
   };
