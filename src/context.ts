@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionManager } from "./sessions.js";
 import type { SkillManager } from "./skills.js";
+import type { AgentRegistry } from "./agents.js";
 
 // ── Inbox types ────────────────────────────────────────────────────────────
 
@@ -13,6 +14,15 @@ export interface InboxMessage {
   read: boolean;
 }
 
+// ── Identity files loaded from workspace ──────────────────────────────────
+
+const IDENTITY_FILES = [
+  "CLAUDE.md",
+  "SOUL.md",
+  "IDENTITY.md",
+  "AGENTS.md",
+];
+
 // ── ContextBuilder ─────────────────────────────────────────────────────────
 
 export class ContextBuilder {
@@ -20,6 +30,7 @@ export class ContextBuilder {
     private sessions: SessionManager,
     private skills: SkillManager,
     private ccgHome: string,
+    private agents?: AgentRegistry,
   ) {}
 
   /**
@@ -32,6 +43,12 @@ export class ContextBuilder {
    */
   async build(agentId: string, sessionKey: string): Promise<string> {
     const parts: string[] = [];
+
+    // 0. Agent identity (CLAUDE.md, SOUL.md, IDENTITY.md, AGENTS.md from workspace)
+    const identitySection = await this.buildIdentitySection(agentId);
+    if (identitySection) {
+      parts.push(identitySection);
+    }
 
     // 1. Conversation history
     parts.push(await this.buildHistorySection(agentId, sessionKey));
@@ -52,6 +69,43 @@ export class ContextBuilder {
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Resolve the workspace path for an agent.
+   * Returns undefined if no AgentRegistry is available or agent not found.
+   */
+  private getWorkspace(agentId: string): string | undefined {
+    if (!this.agents) return undefined;
+    const agent = this.agents.getAgent(agentId);
+    return agent?.workspace;
+  }
+
+  /**
+   * Read identity files from the agent's workspace.
+   * Loads CLAUDE.md, SOUL.md, IDENTITY.md, AGENTS.md (whichever exist).
+   */
+  private async buildIdentitySection(agentId: string): Promise<string | null> {
+    const workspace = this.getWorkspace(agentId);
+    if (!workspace) return null;
+
+    const parts: string[] = [];
+
+    for (const filename of IDENTITY_FILES) {
+      const filePath = join(workspace, filename);
+      if (existsSync(filePath)) {
+        try {
+          const content = await readFile(filePath, "utf-8");
+          parts.push(`=== ${filename} ===\n${content.trim()}`);
+        } catch {
+          // Skip unreadable files
+        }
+      }
+    }
+
+    if (parts.length === 0) return null;
+
+    return `--- Agent Identity ---\n${parts.join("\n\n")}`;
+  }
 
   private async buildHistorySection(
     agentId: string,
@@ -155,28 +209,31 @@ export class ContextBuilder {
   }
 
   /**
-   * Read a daily log file from the agent's workspace memory directory.
-   * The workspace path is resolved via the agents directory structure.
-   * Returns null if the file doesn't exist.
+   * Read a daily log file. Checks the agent's workspace memory/ dir first,
+   * then falls back to $CCG_HOME/agents/{agentId}/memory/.
    */
   private async readDailyLog(
     agentId: string,
     dateStr: string,
   ): Promise<string | null> {
-    // Daily logs live in $CCG_HOME/agents/{agentId}/memory/YYYY-MM-DD.md
-    const logPath = join(
-      this.ccgHome,
-      "agents",
-      agentId,
-      "memory",
-      `${dateStr}.md`,
-    );
+    const filename = `${dateStr}.md`;
 
-    if (!existsSync(logPath)) {
-      return null;
+    // 1. Try workspace memory/ dir
+    const workspace = this.getWorkspace(agentId);
+    if (workspace) {
+      const wsPath = join(workspace, "memory", filename);
+      if (existsSync(wsPath)) {
+        return readFile(wsPath, "utf-8");
+      }
     }
 
-    return readFile(logPath, "utf-8");
+    // 2. Fallback to $CCG_HOME/agents/{agentId}/memory/
+    const ccgPath = join(this.ccgHome, "agents", agentId, "memory", filename);
+    if (existsSync(ccgPath)) {
+      return readFile(ccgPath, "utf-8");
+    }
+
+    return null;
   }
 }
 

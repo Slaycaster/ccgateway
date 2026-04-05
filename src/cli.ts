@@ -163,7 +163,7 @@ program
     const registry = new AgentRegistry(config);
     const sessions = new SessionManager(ccgHome);
     const skills = new SkillManager(ccgHome);
-    const context = new ContextBuilder(sessions, skills, ccgHome);
+    const context = new ContextBuilder(sessions, skills, ccgHome, registry);
     const spawner = new CCSpawner();
 
     try {
