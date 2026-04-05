@@ -7,6 +7,7 @@ import { CCSpawner } from './spawner.js';
 import { MessageRouter } from './router.js';
 import { PluginLoader } from './plugin.js';
 import type { CcgCore } from './plugin.js';
+import { CrossAgentMessenger } from './messaging.js';
 import { configureLogger, logger } from './logger.js';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,43 +46,37 @@ export async function startDaemon(): Promise<void> {
     config.bindings,
   );
 
-  // 5. Build CcgCore object for plugins
+  // 5. Create PluginLoader and messenger (messenger needs loader reference)
+  const loader = new PluginLoader();
+  const messenger = new CrossAgentMessenger(
+    registry,
+    config.bindings,
+    loader,
+    ccgHome,
+  );
+
+  // 6. Build CcgCore object for plugins
   const core: CcgCore = {
     config,
     agents: registry,
     sessions,
     router,
-    async send(agentId: string, message: string, _fromAgent?: string): Promise<void> {
-      const agent = registry.getAgent(agentId);
-      if (!agent) throw new Error(`Agent "${agentId}" not found`);
-
-      await router.route({
-        from: {
-          gateway: 'internal',
-          channel: 'daemon',
-          user: _fromAgent || 'system',
-          userId: _fromAgent || 'system',
-          messageId: `internal-${Date.now()}`,
-        },
-        to: { agent: agentId },
-        content: message,
-        attachments: [],
-      });
+    async send(agentId: string, message: string, fromAgent?: string): Promise<void> {
+      await messenger.send(agentId, message, fromAgent);
     },
   };
 
-  // 6. Load and init all plugins via PluginLoader
-  const loader = new PluginLoader();
+  // 7. Load and init all plugins via PluginLoader
   await loader.loadPlugins(config, core);
 
-  // 7. Start all plugins
+  // 8. Start all plugins
   await loader.startAll();
 
-  // 8. Write PID file
+  // 9. Write PID file
   const pid = process.pid;
   writeFileSync(pidPath(), String(pid), 'utf-8');
 
-  // 9. Set up signal handlers for graceful shutdown
+  // 10. Set up signal handlers for graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`ccgateway received ${signal}, shutting down...`);
     try {
@@ -97,7 +92,7 @@ export async function startDaemon(): Promise<void> {
   process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
   process.on('SIGINT', () => { void shutdown('SIGINT'); });
 
-  // 10. Log startup
+  // 11. Log startup
   const agentCount = registry.listAgents().length;
   const pluginCount = loader.getPlugins().length;
   logger.info(
@@ -107,7 +102,7 @@ export async function startDaemon(): Promise<void> {
     `ccgateway started (pid=${pid}, agents=${agentCount}, plugins=${pluginCount})`,
   );
 
-  // 11. Keep process alive — plugins maintain connections via event loops.
+  // 12. Keep process alive — plugins maintain connections via event loops.
   // If no plugins are keeping the event loop alive, use a heartbeat interval.
   const keepAlive = setInterval(() => {
     // no-op: keeps the event loop alive

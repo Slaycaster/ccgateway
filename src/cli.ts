@@ -14,6 +14,8 @@ import { ContextBuilder } from "./context.js";
 import { CCSpawner } from "./spawner.js";
 import { startChat } from "./chat.js";
 import { HeartbeatManager } from "./heartbeat.js";
+import { CrossAgentMessenger } from "./messaging.js";
+import { PluginLoader } from "./plugin.js";
 import { startDaemon, stopDaemon, getDaemonStatus } from "./daemon.js";
 import { migrateFromOpenClaw, initNew } from "./migrate.js";
 
@@ -35,20 +37,38 @@ program
   .description("ccgateway — multi-agent orchestration layer for Claude Code")
   .version(pkg.version);
 
-// ── Remaining stubs ─────────────────────────────────────────────────────────
+// ── send command ────────────────────────────────────────────────────────────
 
-const stubs = [
-  { name: "send", desc: "Send a message to an agent" },
-] as const;
+program
+  .command("send <agent> <message>")
+  .description("Send a message to an agent's primary channel")
+  .option("--direct", "Force file-based inbox delivery")
+  .option("--from <agentId>", "Specify sender agent id")
+  .action(async (agent: string, message: string, opts: { direct?: boolean; from?: string }) => {
+    try {
+      const config = await loadConfig();
+      const ccgHome = getCcgHome();
+      const registry = new AgentRegistry(config);
+      const loader = new PluginLoader();
+      const messenger = new CrossAgentMessenger(
+        registry,
+        config.bindings,
+        loader,
+        ccgHome,
+      );
 
-for (const stub of stubs) {
-  program
-    .command(stub.name)
-    .description(stub.desc)
-    .action(() => {
-      console.log(`${stub.name}: Not implemented yet`);
-    });
-}
+      if (opts.direct) {
+        await messenger.sendToInbox(agent, message, opts.from);
+        console.log(`Message delivered to ${agent}'s inbox.`);
+      } else {
+        await messenger.send(agent, message, opts.from);
+        console.log(`Message sent to ${agent}.`);
+      }
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
 
 // ── start / stop / status ───────────────────────────────────────────────────
 
