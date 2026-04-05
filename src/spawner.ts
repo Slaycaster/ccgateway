@@ -43,6 +43,7 @@ export class CCSpawner {
 
     const args = [
       "--print",
+      "--dangerously-skip-permissions",
       "-p",
       message,
       "--append-system-prompt",
