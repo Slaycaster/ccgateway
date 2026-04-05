@@ -1,9 +1,9 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { saveConfig, ensureDirectories } from './config.js';
-import type { CcgConfig, AgentConfig, BindingConfig, HeartbeatConfig } from './config.js';
+import { saveConfig, ensureDirectories, getCcgHome } from './config.js';
+import type { CcgConfig, AgentConfig, BindingConfig, HeartbeatConfig, PluginEntry } from './config.js';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -124,10 +124,28 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
   // 4. Extract bindings
   const bindings = extractBindings(ocConfig);
 
-  // 5. Extract bot tokens
-  const tokenInstructions = extractBotTokens(ocConfig);
+  // 5. Extract bot tokens + generate .env and plugin config
+  const { envLines, pluginBots, instructions: tokenInstructions } = extractBotTokens(ocConfig);
 
-  // 6. Extract heartbeats from cron/jobs.json
+  // 6. Extract guild ID for Discord plugin config
+  const guildId = extractGuildId(ocConfig);
+
+  // 7. Build Discord gateway plugin entry if we have bots
+  const plugins: PluginEntry[] = [];
+  if (Object.keys(pluginBots).length > 0) {
+    plugins.push({
+      name: 'discord-gateway',
+      enabled: true,
+      config: {
+        bots: pluginBots,
+        guild: guildId || '',
+        allowedUsers: extractAllowedUsers(ocConfig),
+        commands: ['/new', '/reset', '/status'],
+      },
+    });
+  }
+
+  // 8. Extract heartbeats from cron/jobs.json
   const cronPath = join(
     options.configPath
       ? join(options.configPath, '..', 'cron', 'jobs.json')
@@ -135,18 +153,19 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
   );
   const heartbeats = await extractHeartbeats(cronPath);
 
-  // 7. Build ccgateway config
+  // 9. Build ccgateway config
   const ccgConfig: CcgConfig = {
     agents,
     bindings,
-    plugins: [],
+    plugins,
     heartbeats,
   };
 
-  // 8. Print summary
+  // 10. Print summary
   console.log('--- OpenClaw Migration Summary ---');
   console.log(`  Agents:     ${agents.length}`);
   console.log(`  Bindings:   ${bindings.length}`);
+  console.log(`  Plugins:    ${plugins.length}`);
   console.log(`  Heartbeats: ${heartbeats.length}`);
   console.log();
 
@@ -166,6 +185,14 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
     console.log();
   }
 
+  if (plugins.length > 0) {
+    console.log('Plugins:');
+    for (const p of plugins) {
+      console.log(`  ${p.name} (${p.enabled ? 'enabled' : 'disabled'})`);
+    }
+    console.log();
+  }
+
   if (heartbeats.length > 0) {
     console.log('Heartbeats:');
     for (const h of heartbeats) {
@@ -174,25 +201,38 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
     console.log();
   }
 
-  if (tokenInstructions.length > 0) {
-    console.log('Bot tokens — set these environment variables:');
-    for (const instruction of tokenInstructions) {
-      console.log(`  ${instruction}`);
+  if (envLines.length > 0) {
+    console.log(`Bot tokens found: ${envLines.length}`);
+    for (const line of tokenInstructions) {
+      console.log(line);
     }
     console.log();
   }
 
-  // 9. Dry run check
+  // 11. Dry run check
   if (options.dryRun) {
     console.log('[dry-run] No files were written.');
     return;
   }
 
-  // 10. Save config and ensure directories
+  // 12. Save config, .env, and ensure directories
   await ensureDirectories();
   await saveConfig(ccgConfig);
 
-  console.log(`Config written to: ${join(process.env.CCG_HOME || join(homedir(), '.ccgateway'), 'config.json')}`);
+  const home = getCcgHome();
+
+  // Write .env with actual bot tokens
+  if (envLines.length > 0) {
+    const envPath = join(home, '.env');
+    await writeFile(envPath, envLines.join('\n') + '\n', 'utf-8');
+    console.log(`Bot tokens written to: ${envPath}`);
+  }
+
+  console.log(`Config written to: ${join(home, 'config.json')}`);
+  console.log();
+  console.log('To start ccgateway, load the .env first:');
+  console.log(`  source ${join(home, '.env')} && ccg start`);
+  console.log();
   console.log('Migration complete.');
 }
 
@@ -246,19 +286,63 @@ function extractBindings(config: OpenClawConfig): BindingConfig[] {
   }));
 }
 
-function extractBotTokens(config: OpenClawConfig): string[] {
-  const accounts = config.channels?.discord?.accounts;
-  if (!accounts) return [];
+interface ExtractedTokens {
+  envLines: string[];       // Lines for .env file (VAR=value)
+  pluginBots: Record<string, { token: string }>;  // For plugin config ($VAR references)
+  instructions: string[];   // Human-readable summary
+}
 
+function extractBotTokens(config: OpenClawConfig): ExtractedTokens {
+  const accounts = config.channels?.discord?.accounts;
+  if (!accounts) return { envLines: [], pluginBots: {}, instructions: [] };
+
+  const envLines: string[] = [];
+  const pluginBots: Record<string, { token: string }> = {};
   const instructions: string[] = [];
+
   for (const [name, account] of Object.entries(accounts)) {
     const envVar = botTokenEnvVar(name);
     if (account.token) {
-      instructions.push(`export ${envVar}="<your-token>"`);
+      envLines.push(`${envVar}=${account.token}`);
+      pluginBots[name] = { token: `$${envVar}` };
+      instructions.push(`  ${envVar} → ${name} bot`);
     }
   }
 
-  return instructions;
+  return { envLines, pluginBots, instructions };
+}
+
+function extractGuildId(config: OpenClawConfig): string | undefined {
+  const accounts = config.channels?.discord?.accounts;
+  if (!accounts) return undefined;
+  // Take the first guild ID found across any account
+  for (const account of Object.values(accounts)) {
+    const guilds = (account as Record<string, unknown>).guilds as Record<string, unknown> | undefined;
+    if (guilds) {
+      const firstGuildId = Object.keys(guilds)[0];
+      if (firstGuildId) return firstGuildId;
+    }
+  }
+  return undefined;
+}
+
+function extractAllowedUsers(config: OpenClawConfig): string[] {
+  const accounts = config.channels?.discord?.accounts;
+  if (!accounts) return [];
+  // Collect unique user IDs from all guild user lists
+  const users = new Set<string>();
+  for (const account of Object.values(accounts)) {
+    const guilds = (account as Record<string, unknown>).guilds as Record<string, Record<string, unknown>> | undefined;
+    if (guilds) {
+      for (const guild of Object.values(guilds)) {
+        const guildUsers = guild.users as string[] | undefined;
+        if (guildUsers) {
+          for (const u of guildUsers) users.add(u);
+        }
+      }
+    }
+  }
+  return [...users];
 }
 
 async function extractHeartbeats(cronPath: string): Promise<HeartbeatConfig[]> {
