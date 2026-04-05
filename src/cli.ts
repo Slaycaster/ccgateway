@@ -299,6 +299,90 @@ sessionsCmd
     console.log(`Session "${sessionKey}" has been archived and reset.`);
   });
 
+// ── skills subcommand ────────────────────────────────────────────────────
+
+const skillsCmd = program
+  .command("skills")
+  .description("Manage skills");
+
+skillsCmd
+  .command("list")
+  .description("List all skills (name, description, type, scope)")
+  .option("--agent <id>", "Filter by agent id")
+  .action(async (opts) => {
+    const mgr = new SkillManager(getCcgHome());
+    const skills = await mgr.listSkills(opts.agent);
+
+    if (skills.length === 0) {
+      console.log("No skills found.");
+      return;
+    }
+
+    const header = ["Name", "Description", "Type", "Scope"];
+    const rows = skills.map((s) => [
+      s.name,
+      s.description,
+      s.type,
+      s.agentId ? `agent:${s.agentId}` : "shared",
+    ]);
+
+    const widths = header.map((h, i) =>
+      Math.max(h.length, ...rows.map((r) => r[i].length)),
+    );
+
+    const formatRow = (cols: string[]) =>
+      cols.map((c, i) => c.padEnd(widths[i])).join("  ");
+
+    console.log(formatRow(header));
+    console.log(widths.map((w) => "-".repeat(w)).join("  "));
+    for (const row of rows) {
+      console.log(formatRow(row));
+    }
+  });
+
+skillsCmd
+  .command("add <file>")
+  .description("Add a skill (copy .md file to skills directory)")
+  .option("--agent <id>", "Add to agent-specific skills")
+  .action(async (file: string, opts) => {
+    const filePath = resolve(file);
+
+    if (!existsSync(filePath)) {
+      console.error(`Error: File does not exist: ${filePath}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!filePath.endsWith(".md")) {
+      console.error("Error: Skill file must be a .md file");
+      process.exitCode = 1;
+      return;
+    }
+
+    const mgr = new SkillManager(getCcgHome());
+    await mgr.addSkill(filePath, opts.agent);
+
+    const scope = opts.agent ? `agent:${opts.agent}` : "shared";
+    console.log(`Skill added to ${scope} skills.`);
+  });
+
+skillsCmd
+  .command("remove <name>")
+  .description("Remove a skill")
+  .option("--agent <id>", "Remove from agent-specific skills")
+  .action(async (name: string, opts) => {
+    const mgr = new SkillManager(getCcgHome());
+    const removed = await mgr.removeSkill(name, opts.agent);
+
+    if (!removed) {
+      console.error(`Error: Skill "${name}" not found.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(`Skill "${name}" removed.`);
+  });
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 
 program.parse();
