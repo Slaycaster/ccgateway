@@ -125,6 +125,11 @@ export class PluginLoader {
     }
   }
 
+  /** Register a plugin that was created externally (e.g., built-in plugins). */
+  registerPlugin(plugin: CcgPlugin): void {
+    this.plugins.push(plugin);
+  }
+
   /** Returns all loaded plugins. */
   getPlugins(): CcgPlugin[] {
     return [...this.plugins];

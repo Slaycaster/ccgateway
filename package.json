@@ -4,7 +4,8 @@
   "description": "Multi-agent orchestration layer built on Claude Code CLI",
   "type": "module",
   "bin": {
-    "ccg": "./dist/cli.js"
+    "ccg": "./dist/cli.js",
+    "ccg-dev": "./bin/ccg-dev.sh"
   },
   "scripts": {
     "build": "tsc",

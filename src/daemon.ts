@@ -6,11 +6,21 @@ import { ContextBuilder } from './context.js';
 import { CCSpawner } from './spawner.js';
 import { MessageRouter } from './router.js';
 import { PluginLoader } from './plugin.js';
-import type { CcgCore } from './plugin.js';
+import type { CcgCore, CcgPlugin } from './plugin.js';
 import { CrossAgentMessenger } from './messaging.js';
 import { configureLogger, logger } from './logger.js';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Built-in plugin factories
+import createDiscordGateway from './plugins/discord-gateway.js';
+import createSlackGateway from './plugins/slack-gateway.js';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const BUILTIN_PLUGINS: Record<string, (config: any) => CcgPlugin> = {
+  'discord-gateway': createDiscordGateway,
+  'slack-gateway': createSlackGateway,
+};
 
 /**
  * Start the ccgateway daemon (foreground).
@@ -66,8 +76,24 @@ export async function startDaemon(): Promise<void> {
     },
   };
 
-  // 7. Load and init all plugins via PluginLoader
-  await loader.loadPlugins(config, core);
+  // 7. Load built-in plugins + any external plugins
+  for (const entry of config.plugins) {
+    if (!entry.enabled) continue;
+
+    let plugin: CcgPlugin;
+    const builtinFactory = BUILTIN_PLUGINS[entry.name];
+    if (builtinFactory) {
+      plugin = builtinFactory(entry.config);
+    } else {
+      // Fall back to generic import for external plugins
+      await loader.loadPlugins({ ...config, plugins: [entry] }, core);
+      continue;
+    }
+
+    await plugin.init(core);
+    loader.registerPlugin(plugin);
+    logger.info(`plugin: loaded built-in "${plugin.name}" (type=${plugin.type})`);
+  }
 
   // 8. Start all plugins
   await loader.startAll();
