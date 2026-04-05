@@ -8,6 +8,7 @@ import { MessageRouter } from './router.js';
 import { PluginLoader } from './plugin.js';
 import type { CcgCore, CcgPlugin } from './plugin.js';
 import { CrossAgentMessenger } from './messaging.js';
+import { createIpcServer, socketPath } from './ipc.js';
 import { configureLogger, logger } from './logger.js';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -99,13 +100,22 @@ export async function startDaemon(): Promise<void> {
   // 8. Start all plugins
   await loader.startAll();
 
-  // 9. Write PID file
+  // 9. Start IPC server for cross-agent messaging from CLI
+  const ipcServer = createIpcServer(async (toAgent, content, fromAgent) => {
+    await messenger.send(toAgent, content, fromAgent);
+  });
+
+  // 10. Write PID file
   const pid = process.pid;
   writeFileSync(pidPath(), String(pid), 'utf-8');
 
-  // 10. Set up signal handlers for graceful shutdown
+  // 11. Set up signal handlers for graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`ccgateway received ${signal}, shutting down...`);
+    try {
+      ipcServer.close();
+      removeSocketFile();
+    } catch { /* non-fatal */ }
     try {
       await loader.stopAll();
     } catch (err) {
@@ -119,7 +129,7 @@ export async function startDaemon(): Promise<void> {
   process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
   process.on('SIGINT', () => { void shutdown('SIGINT'); });
 
-  // 11. Log startup
+  // 12. Log startup
   const agentCount = registry.listAgents().length;
   const pluginCount = loader.getPlugins().length;
   logger.info(
@@ -129,7 +139,7 @@ export async function startDaemon(): Promise<void> {
     `ccgateway started (pid=${pid}, agents=${agentCount}, plugins=${pluginCount})`,
   );
 
-  // 12. Keep process alive — plugins maintain connections via event loops.
+  // 13. Keep process alive — plugins maintain connections via event loops.
   // If no plugins are keeping the event loop alive, use a heartbeat interval.
   const keepAlive = setInterval(() => {
     // no-op: keeps the event loop alive
@@ -234,6 +244,18 @@ function isProcessRunning(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Remove the Unix socket file if it exists. */
+function removeSocketFile(): void {
+  const path = socketPath();
+  if (existsSync(path)) {
+    try {
+      unlinkSync(path);
+    } catch {
+      // ignore removal errors
+    }
   }
 }
 

@@ -47,23 +47,47 @@ program
   .option("--from <agentId>", "Specify sender agent id")
   .action(async (agent: string, message: string, opts: { direct?: boolean; from?: string }) => {
     try {
-      const config = await loadConfig();
-      const ccgHome = getCcgHome();
-      const registry = new AgentRegistry(config);
-      const loader = new PluginLoader();
-      const messenger = new CrossAgentMessenger(
-        registry,
-        config.bindings,
-        loader,
-        ccgHome,
-      );
-
       if (opts.direct) {
+        // Force inbox delivery — bypass daemon
+        const config = await loadConfig();
+        const ccgHome = getCcgHome();
+        const registry = new AgentRegistry(config);
+        const loader = new PluginLoader();
+        const messenger = new CrossAgentMessenger(
+          registry,
+          config.bindings,
+          loader,
+          ccgHome,
+        );
         await messenger.sendToInbox(agent, message, opts.from);
         console.log(`Message delivered to ${agent}'s inbox.`);
       } else {
-        await messenger.send(agent, message, opts.from);
-        console.log(`Message sent to ${agent}.`);
+        // Try IPC to running daemon first (has live gateway connections)
+        const { sendViaDaemon } = await import("./ipc.js");
+        const handled = await sendViaDaemon({
+          action: "send",
+          to: agent,
+          content: message,
+          from: opts.from,
+        });
+
+        if (handled) {
+          console.log(`Message sent to ${agent} (via daemon).`);
+        } else {
+          // Daemon not running — fall back to inbox
+          const config = await loadConfig();
+          const ccgHome = getCcgHome();
+          const registry = new AgentRegistry(config);
+          const loader = new PluginLoader();
+          const messenger = new CrossAgentMessenger(
+            registry,
+            config.bindings,
+            loader,
+            ccgHome,
+          );
+          await messenger.sendToInbox(agent, message, opts.from);
+          console.log(`Message delivered to ${agent}'s inbox (daemon not running).`);
+        }
       }
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -363,6 +387,10 @@ agentsCmd
     "Max concurrent sessions",
     "4",
   )
+  .option(
+    "--timeoutMs <ms>",
+    "Timeout in milliseconds for claude --print (default: 300000 = 5 min)",
+  )
   .action(async (opts) => {
     const workspacePath = resolve(opts.workspace);
 
@@ -384,6 +412,7 @@ agentsCmd
       skills: opts.skills,
       allowedTools: opts.allowedTools,
       maxConcurrentSessions: parseInt(opts.maxConcurrentSessions, 10),
+      ...(opts.timeoutMs ? { timeoutMs: parseInt(opts.timeoutMs, 10) } : {}),
     };
 
     try {
@@ -438,6 +467,8 @@ agentsCmd
     console.log(`  Skills:                ${agent.skills.length > 0 ? agent.skills.join(", ") : "(none)"}`);
     console.log(`  Allowed tools:         ${agent.allowedTools.join(", ")}`);
     console.log(`  Max concurrent:        ${agent.maxConcurrentSessions}`);
+    console.log(`  Timeout:               ${agent.timeoutMs ? `${agent.timeoutMs}ms (${Math.round(agent.timeoutMs / 1000)}s)` : "300000ms (default)"}`);
+
 
     const validation = registry.validateWorkspace(id);
     if (validation.valid) {

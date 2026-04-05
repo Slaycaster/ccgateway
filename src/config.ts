@@ -14,6 +14,7 @@ export interface AgentConfig {
   skills: string[];
   allowedTools: string[];
   maxConcurrentSessions: number;
+  timeoutMs?: number;
 }
 
 export interface BindingConfig {

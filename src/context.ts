@@ -65,7 +65,13 @@ export class ContextBuilder {
       parts.push(inboxSection);
     }
 
-    // 5. Memory section
+    // 5. Agent roster & messaging
+    const rosterSection = this.buildRosterSection(agentId);
+    if (rosterSection) {
+      parts.push(rosterSection);
+    }
+
+    // 6. Memory section
     parts.push(await this.buildMemorySection(agentId));
 
     return parts.join("\n\n");
@@ -150,6 +156,28 @@ export class ContextBuilder {
     });
 
     return `--- Conversation History ---\n${lines.join("\n")}`;
+  }
+
+  private buildRosterSection(agentId: string): string | null {
+    if (!this.agents) return null;
+
+    const allAgents = this.agents.listAgents();
+    const others = allAgents.filter((a) => a.id !== agentId);
+
+    if (others.length === 0) return null;
+
+    const lines = ["--- Agent Roster ---"];
+    lines.push("Other agents you can communicate with:");
+    for (const a of others) {
+      lines.push(`  - ${a.emoji ? a.emoji + " " : ""}${a.name} (id: ${a.id})`);
+    }
+    lines.push("");
+    lines.push("To send a message to another agent:");
+    lines.push('  ccg send <agent-id> "your message" --from ' + agentId);
+    lines.push("");
+    lines.push("The message will be posted to their Discord/Slack channel and they will process it and reply.");
+
+    return lines.join("\n");
   }
 
   private async buildInboxSection(agentId: string): Promise<string | null> {

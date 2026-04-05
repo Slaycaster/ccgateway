@@ -85,20 +85,22 @@ export class MessageRouter {
       systemPrompt,
       model: agent.model,
       allowedTools: agent.allowedTools,
+      ...(agent.timeoutMs ? { timeoutMs: agent.timeoutMs } : {}),
     });
 
     // 6. Handle failure: append error to session and throw
     if (result.exitCode !== 0) {
-      const errorContent = result.response || `Spawner failed with exit code ${result.exitCode}`;
+      const isTimeout = result.exitCode === 124;
+      const errorContent = isTimeout
+        ? "The task timed out — it took longer than the allowed time. Try breaking it into smaller steps, or increase the agent's `timeoutMs` setting."
+        : result.response || `Spawner failed with exit code ${result.exitCode}`;
       await this.sessions.appendMessage(agentId, sessionKey, {
         role: "assistant",
         content: `[error] ${errorContent}`,
         ts: Date.now(),
         tokens: result.tokensEstimate,
       });
-      throw new Error(
-        `Spawner exited with code ${result.exitCode}: ${errorContent}`,
-      );
+      throw new Error(errorContent);
     }
 
     // 7. Append assistant response to session

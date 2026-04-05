@@ -249,6 +249,35 @@ describe("route — full pipeline", () => {
     });
   });
 
+  it("passes per-agent timeoutMs to spawner when configured", async () => {
+    const agentWithTimeout: AgentConfig = {
+      ...AGENT_SALT,
+      id: "slow-agent",
+      timeoutMs: 600_000,
+    };
+
+    (agents.getAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      (id: string) => (id === "slow-agent" ? agentWithTimeout : undefined),
+    );
+
+    const message = makeMessage({
+      to: { agent: "slow-agent" },
+    });
+
+    await router.route(message);
+
+    expect(spawner.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ timeoutMs: 600_000 }),
+    );
+  });
+
+  it("does not pass timeoutMs to spawner when not configured on agent", async () => {
+    await router.route(makeMessage());
+
+    const spawnCall = (spawner.spawn as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(spawnCall).not.toHaveProperty("timeoutMs");
+  });
+
   it("passes context.build result as systemPrompt to spawner", async () => {
     const customContext = "Custom context for this agent";
     (context.build as ReturnType<typeof vi.fn>).mockResolvedValue(customContext);
@@ -293,7 +322,7 @@ describe("route — error handling", () => {
     const message = makeMessage();
 
     await expect(router.route(message)).rejects.toThrow(
-      "Spawner exited with code 1",
+      "Something went wrong",
     );
 
     // Should still have appended 2 messages: user + error
@@ -306,7 +335,7 @@ describe("route — error handling", () => {
     expect(errorMsg.content).toContain("Something went wrong");
   });
 
-  it("handles spawner failure with empty response", async () => {
+  it("handles timeout (exit code 124) with friendly error message", async () => {
     (spawner.spawn as ReturnType<typeof vi.fn>).mockResolvedValue({
       response: "",
       exitCode: 124,
@@ -316,13 +345,14 @@ describe("route — error handling", () => {
     const message = makeMessage();
 
     await expect(router.route(message)).rejects.toThrow(
-      "Spawner exited with code 124",
+      "timed out",
     );
 
     const appendCalls = (sessions.appendMessage as ReturnType<typeof vi.fn>).mock.calls;
     const errorMsg = appendCalls[1][2];
     expect(errorMsg.content).toContain("[error]");
-    expect(errorMsg.content).toContain("exit code 124");
+    expect(errorMsg.content).toContain("timed out");
+    expect(errorMsg.content).toContain("timeoutMs");
   });
 });
 

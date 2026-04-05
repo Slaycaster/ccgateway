@@ -326,6 +326,57 @@ describe("build — memory section", () => {
   });
 });
 
+// ── Agent roster ──────────────────────────────────────────────────────────
+
+describe("build — agent roster", () => {
+  it("includes other agents in roster section", async () => {
+    const { AgentRegistry } = await import("../agents.js");
+    const config = {
+      agents: [
+        { id: "salt", name: "Salt", emoji: "🧂", workspace: "/tmp/salt", model: "sonnet", skills: [], allowedTools: [], maxConcurrentSessions: 4 },
+        { id: "pepper", name: "Pepper", emoji: "🌶️", workspace: "/tmp/pepper", model: "sonnet", skills: [], allowedTools: [], maxConcurrentSessions: 4 },
+        { id: "basil", name: "Basil", emoji: "🌿", workspace: "/tmp/basil", model: "sonnet", skills: [], allowedTools: [], maxConcurrentSessions: 4 },
+      ],
+      bindings: [],
+      plugins: [],
+      heartbeats: [],
+    };
+    const registry = new AgentRegistry(config);
+    const builderWithAgents = new ContextBuilder(sessions, skills, tempDir, registry);
+
+    const key = "salt:discord:12345";
+    const context = await builderWithAgents.build("salt", key);
+
+    expect(context).toContain("--- Agent Roster ---");
+    expect(context).toContain("Pepper (id: pepper)");
+    expect(context).toContain("Basil (id: basil)");
+    // Should NOT include self
+    expect(context).not.toContain("Salt (id: salt)");
+    // Should include messaging instructions
+    expect(context).toContain("ccg send");
+    expect(context).toContain("--from salt");
+  });
+
+  it("omits roster when only one agent exists", async () => {
+    const { AgentRegistry } = await import("../agents.js");
+    const config = {
+      agents: [
+        { id: "salt", name: "Salt", emoji: "🧂", workspace: "/tmp/salt", model: "sonnet", skills: [], allowedTools: [], maxConcurrentSessions: 4 },
+      ],
+      bindings: [],
+      plugins: [],
+      heartbeats: [],
+    };
+    const registry = new AgentRegistry(config);
+    const builderWithAgents = new ContextBuilder(sessions, skills, tempDir, registry);
+
+    const key = "salt:discord:12345";
+    const context = await builderWithAgents.build("salt", key);
+
+    expect(context).not.toContain("--- Agent Roster ---");
+  });
+});
+
 // ── Full assembly ──────────────────────────────────────────────────────────
 
 describe("build — full assembly", () => {

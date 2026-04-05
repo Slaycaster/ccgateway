@@ -291,6 +291,13 @@ export default function createDiscordGateway(
       for (const chunk of chunks) {
         await (msg.channel as TextChannel).send(chunk);
       }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error(`discord-gateway: error handling message: ${errMsg}`);
+
+      await (msg.channel as TextChannel).send(
+        `⚠️ Error: ${errMsg}`,
+      ).catch(() => {});
     } finally {
       clearInterval(typingInterval);
     }
