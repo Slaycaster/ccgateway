@@ -2,7 +2,7 @@
   <img src="assets/logo.jpg" alt="ccgateway logo" width="600" />
 </p>
 
-# ccgateway
+# ccgateway - Multi-agent orchestration for Claude Code
 
 **Multi-agent orchestration for Claude Code CLI.**
 
@@ -45,9 +45,9 @@ journalctl --user -u ccgateway -f
 
 `ccg install` creates a systemd user service that auto-starts on boot, restarts on failure, and sources `~/.ccgateway/.env` for bot tokens. Run `loginctl enable-linger $USER` to keep it running after you log out.
 
-## Why ccgateway
+## Why ccgateway over OpenClaw?
 
-If you're coming from OpenClaw, you already know what multi-agent orchestration looks like. Same agent identities, same Discord channels, same memory files, same workflows. ccgateway gives you all of that running legitimately on Claude Code CLI.
+If you're coming from OpenClaw, you already know what multi-agent orchestration looks like. Same agent identities, same Discord channels, same memory files, same workflows. ccgateway gives you all of that running legitimately on Claude Code CLI. If you're using different models other than Claude, then you're better off using OpenClaw.
 
 One command migrates your existing setup:
 
@@ -65,7 +65,7 @@ ccgateway doesn't proxy, wrap, or intercept Claude Code sessions. Every agent in
 
 | Feature | OpenClaw | ccgateway |
 |---|---|---|
-| Anthropic ToS compliant | No | **Yes** |
+| Anthropic will hunt you? | No | **Yes** |
 | Uses CC subscription (no API billing) | No | **Yes** |
 | Multi-agent identities | Yes | Yes |
 | Discord gateway | Yes | Yes |
@@ -91,6 +91,32 @@ ccg agents list
 ```
 
 Agents read their identity from `CLAUDE.md`, `SOUL.md`, `IDENTITY.md`, and `AGENTS.md` in their workspace. Use whatever combination works for you.
+
+
+## Migration from OpenClaw
+
+```bash
+# Preview what gets imported
+ccg migrate openclaw --dry-run
+
+# Run the migration
+ccg migrate openclaw
+```
+
+### What gets migrated
+
+- **Agents** — IDs, names, emojis, workspaces, model preferences
+- **Channel bindings** — All Discord channel-to-agent mappings (from both `bindings[]` and guild channel configs)
+- **Bot tokens** — Written to `~/.ccgateway/.env` with actual values from your OpenClaw config
+- **Heartbeats** — Cron schedules converted from OpenClaw's job format
+- **Discord gateway plugin** — Auto-configured with your bots, guild, and allowed users
+
+### What stays as-is
+
+- Agent workspaces (`CLAUDE.md`, `SOUL.md`, `MEMORY.md`, `memory/`) — untouched
+- Git repositories, worktrees, project files — untouched
+- Consolidation of `AGENTS.md` + `SOUL.md` + `IDENTITY.md` into `CLAUDE.md` is optional — ccgateway reads all of them
+
 
 ### Discord & Slack Gateways
 
@@ -166,7 +192,7 @@ ccg heartbeat run salt   # Manual trigger
 Test agents locally without Discord or Slack:
 
 ```bash
-ccg chat salt
+ccg chat main
 ```
 
 Same session management, same context building, same agent identity — just in your terminal.
@@ -208,30 +234,6 @@ Same session management, same context building, same agent identity — just in 
 Every agent invocation is stateless. ccgateway assembles the full context — identity files, conversation history, skill index, memory — and passes it to `claude --print` via `--append-system-prompt`. Claude Code reads `CLAUDE.md` from the workspace automatically. The response gets appended to the session JSONL and routed back to Discord/Slack.
 
 No persistent processes per agent. No session hijacking. No API keys. Just `claude --print` with the right context, in the right directory.
-
-## Migration from OpenClaw
-
-```bash
-# Preview what gets imported
-ccg migrate openclaw --dry-run
-
-# Run the migration
-ccg migrate openclaw
-```
-
-### What gets migrated
-
-- **Agents** — IDs, names, emojis, workspaces, model preferences
-- **Channel bindings** — All Discord channel-to-agent mappings (from both `bindings[]` and guild channel configs)
-- **Bot tokens** — Written to `~/.ccgateway/.env` with actual values from your OpenClaw config
-- **Heartbeats** — Cron schedules converted from OpenClaw's job format
-- **Discord gateway plugin** — Auto-configured with your bots, guild, and allowed users
-
-### What stays as-is
-
-- Agent workspaces (`CLAUDE.md`, `SOUL.md`, `MEMORY.md`, `memory/`) — untouched
-- Git repositories, worktrees, project files — untouched
-- Consolidation of `AGENTS.md` + `SOUL.md` + `IDENTITY.md` into `CLAUDE.md` is optional — ccgateway reads all of them
 
 ### Both systems can run side by side during transition.
 
