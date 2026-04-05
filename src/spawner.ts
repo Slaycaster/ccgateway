@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -28,7 +28,10 @@ export class CCSpawner {
    *
    * Executes:
    *   claude --print -p "<message>" --append-system-prompt "<context>"
-   *          --model <model> --allowedTools Tool1,Tool2,...
+   *          --model <model>
+   *
+   * stdin is explicitly closed (ignore) to prevent the Claude CLI from
+   * waiting for piped input.
    *
    * Captures stdout as the response. Estimates tokens as chars / 4.
    */
@@ -57,37 +60,64 @@ export class CCSpawner {
     // since we run with --dangerously-skip-permissions
 
     return new Promise<SpawnResult>((resolve) => {
-      execFile(
-        "claude",
-        args,
-        {
-          cwd: workspace,
-          timeout: timeoutMs,
-          maxBuffer: 10 * 1024 * 1024, // 10 MB
-          encoding: "utf-8",
-        },
-        (error, stdout, stderr) => {
-          const response = (stdout || "").toString();
-          const stderrStr = (stderr || "").toString();
-          const exitCode = error ? (error as NodeJS.ErrnoException & { code?: number | string }).code === "ETIMEDOUT"
-            ? 124
-            : (error as any).status ?? 1
-            : 0;
+      const child = spawn("claude", args, {
+        cwd: workspace,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
-          const inputChars = message.length + systemPrompt.length;
-          const outputChars = response.length;
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
 
-          resolve({
-            response,
-            stderr: stderrStr,
-            exitCode,
-            tokensEstimate: {
-              in: Math.ceil(inputChars / 4),
-              out: Math.ceil(outputChars / 4),
-            },
-          });
-        },
-      );
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      // Timeout — kill the process if it runs too long
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        // Force kill after 5s grace period
+        setTimeout(() => {
+          if (!child.killed) child.kill("SIGKILL");
+        }, 5000);
+      }, timeoutMs);
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+
+        const exitCode = timedOut ? 124 : (code ?? 1);
+        const inputChars = message.length + systemPrompt.length;
+        const outputChars = stdout.length;
+
+        resolve({
+          response: stdout,
+          stderr,
+          exitCode,
+          tokensEstimate: {
+            in: Math.ceil(inputChars / 4),
+            out: Math.ceil(outputChars / 4),
+          },
+        });
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+
+        resolve({
+          response: "",
+          stderr: err.message,
+          exitCode: 1,
+          tokensEstimate: {
+            in: Math.ceil((message.length + systemPrompt.length) / 4),
+            out: 0,
+          },
+        });
+      });
     });
   }
 }
