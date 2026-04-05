@@ -52,9 +52,8 @@ export class CCSpawner {
       model,
     ];
 
-    if (allowedTools.length > 0) {
-      args.push("--allowedTools", allowedTools.join(","));
-    }
+    // allowedTools intentionally omitted — agents have full access
+    // since we run with --dangerously-skip-permissions
 
     return new Promise<SpawnResult>((resolve) => {
       execFile(

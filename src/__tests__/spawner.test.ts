@@ -67,22 +67,7 @@ describe("spawn — command construction", () => {
     expect(args).toContain("You are an assistant");
     expect(args).toContain("--model");
     expect(args).toContain("sonnet");
-    expect(args).toContain("--allowedTools");
-    expect(args).toContain("Read,Write,Bash");
-  });
-
-  it("omits --allowedTools when array is empty", async () => {
-    mockExecFileResult("response");
-
-    await spawner.spawn({
-      workspace: "/home/user/project",
-      message: "Hello",
-      systemPrompt: "Context",
-      model: "sonnet",
-      allowedTools: [],
-    });
-
-    const [, args] = mockedExecFile.mock.calls[0];
+    expect(args).toContain("--dangerously-skip-permissions");
     expect(args).not.toContain("--allowedTools");
   });
 });
