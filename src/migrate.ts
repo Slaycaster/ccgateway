@@ -1,0 +1,342 @@
+import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { saveConfig, ensureDirectories } from './config.js';
+import type { CcgConfig, AgentConfig, BindingConfig, HeartbeatConfig } from './config.js';
+
+// ── Interfaces ──────────────────────────────────────────────────────────────
+
+export interface MigrateOptions {
+  configPath?: string;  // custom openclaw.json path
+  dryRun?: boolean;
+}
+
+// ── OpenClaw JSON shape ─────────────────────────────────────────────────────
+
+interface OpenClawAgent {
+  id: string;
+  name?: string;
+  default?: boolean;
+  workspace?: string;
+  agentDir?: string;
+  model?: {
+    primary?: string;
+  };
+  identity?: {
+    name?: string;
+    theme?: string;
+    emoji?: string;
+    avatar?: string;
+  };
+  subagents?: {
+    allowAgents?: string[];
+    maxConcurrent?: number;
+  };
+}
+
+interface OpenClawBinding {
+  agentId: string;
+  match: {
+    channel: string;
+    accountId: string;
+    peer: {
+      kind: string;
+      id: string;
+    };
+  };
+}
+
+interface OpenClawCronJob {
+  id: string;
+  agentId: string;
+  name: string;
+  enabled: boolean;
+  schedule: {
+    kind: string;
+    expr?: string;
+    tz?: string;
+    at?: string;
+  };
+  [key: string]: unknown;
+}
+
+interface OpenClawConfig {
+  agents?: {
+    defaults?: {
+      model?: { primary?: string };
+      workspace?: string;
+      maxConcurrent?: number;
+    };
+    list?: OpenClawAgent[];
+  };
+  bindings?: OpenClawBinding[];
+  channels?: {
+    discord?: {
+      accounts?: Record<string, { token?: string; [key: string]: unknown }>;
+    };
+  };
+}
+
+// ── Migration ───────────────────────────────────────────────────────────────
+
+const DEFAULT_ALLOWED_TOOLS = ['Edit', 'Read', 'Write', 'Bash', 'Grep', 'Glob'];
+
+/**
+ * Strip provider prefix from a model name.
+ * e.g. "anthropic/claude-opus-4-6" -> "claude-opus-4-6"
+ */
+export function stripModelPrefix(model: string): string {
+  const slashIndex = model.indexOf('/');
+  if (slashIndex === -1) return model;
+  return model.slice(slashIndex + 1);
+}
+
+/**
+ * Generate a Discord bot token env var name.
+ * e.g. "ginger" -> "DISCORD_GINGER_TOKEN"
+ */
+export function botTokenEnvVar(accountName: string): string {
+  return `DISCORD_${accountName.toUpperCase()}_TOKEN`;
+}
+
+/**
+ * Migrate from OpenClaw configuration to ccgateway config.
+ */
+export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise<void> {
+  // 1. Find openclaw.json
+  const configFile = options.configPath || join(homedir(), '.openclaw', 'openclaw.json');
+
+  if (!existsSync(configFile)) {
+    throw new Error(
+      `OpenClaw config not found at: ${configFile}\n` +
+      `Specify the path with: ccg migrate openclaw --config <path>`,
+    );
+  }
+
+  // 2. Read and parse
+  const raw = await readFile(configFile, 'utf-8');
+  const ocConfig: OpenClawConfig = JSON.parse(raw);
+
+  // 3. Extract agents
+  const agents = extractAgents(ocConfig);
+
+  // 4. Extract bindings
+  const bindings = extractBindings(ocConfig);
+
+  // 5. Extract bot tokens
+  const tokenInstructions = extractBotTokens(ocConfig);
+
+  // 6. Extract heartbeats from cron/jobs.json
+  const cronPath = join(
+    options.configPath
+      ? join(options.configPath, '..', 'cron', 'jobs.json')
+      : join(homedir(), '.openclaw', 'cron', 'jobs.json'),
+  );
+  const heartbeats = await extractHeartbeats(cronPath);
+
+  // 7. Build ccgateway config
+  const ccgConfig: CcgConfig = {
+    agents,
+    bindings,
+    plugins: [],
+    heartbeats,
+  };
+
+  // 8. Print summary
+  console.log('--- OpenClaw Migration Summary ---');
+  console.log(`  Agents:     ${agents.length}`);
+  console.log(`  Bindings:   ${bindings.length}`);
+  console.log(`  Heartbeats: ${heartbeats.length}`);
+  console.log();
+
+  if (agents.length > 0) {
+    console.log('Agents:');
+    for (const a of agents) {
+      console.log(`  ${a.emoji || '-'} ${a.id} (${a.name}) — model: ${a.model}, workspace: ${a.workspace}`);
+    }
+    console.log();
+  }
+
+  if (bindings.length > 0) {
+    console.log('Bindings:');
+    for (const b of bindings) {
+      console.log(`  ${b.agent} <- ${b.gateway}:${b.channel} (bot: ${b.bot})`);
+    }
+    console.log();
+  }
+
+  if (heartbeats.length > 0) {
+    console.log('Heartbeats:');
+    for (const h of heartbeats) {
+      console.log(`  ${h.agent}: ${h.cron} (${h.tz})`);
+    }
+    console.log();
+  }
+
+  if (tokenInstructions.length > 0) {
+    console.log('Bot tokens — set these environment variables:');
+    for (const instruction of tokenInstructions) {
+      console.log(`  ${instruction}`);
+    }
+    console.log();
+  }
+
+  // 9. Dry run check
+  if (options.dryRun) {
+    console.log('[dry-run] No files were written.');
+    return;
+  }
+
+  // 10. Save config and ensure directories
+  await ensureDirectories();
+  await saveConfig(ccgConfig);
+
+  console.log(`Config written to: ${join(process.env.CCG_HOME || join(homedir(), '.ccgateway'), 'config.json')}`);
+  console.log('Migration complete.');
+}
+
+// ── Extraction helpers ──────────────────────────────────────────────────────
+
+function extractAgents(config: OpenClawConfig): AgentConfig[] {
+  const list = config.agents?.list;
+  if (!list || list.length === 0) return [];
+
+  const defaults = config.agents?.defaults;
+  const defaultModel = defaults?.model?.primary || 'claude-sonnet-4-6';
+  const defaultWorkspace = defaults?.workspace || homedir();
+  const defaultMaxConcurrent = defaults?.maxConcurrent || 4;
+
+  return list.map((agent): AgentConfig => {
+    // Determine model: agent-level override or default
+    const rawModel = agent.model?.primary || defaultModel;
+    const model = stripModelPrefix(rawModel);
+
+    // Determine workspace: agent-level override or default
+    const workspace = agent.workspace || defaultWorkspace;
+
+    // Agent name: identity.name or the agent id
+    const name = agent.identity?.name || agent.name || agent.id;
+
+    // Emoji
+    const emoji = agent.identity?.emoji || '';
+
+    return {
+      id: agent.id,
+      name,
+      emoji,
+      workspace,
+      model,
+      skills: [],
+      allowedTools: [...DEFAULT_ALLOWED_TOOLS],
+      maxConcurrentSessions: defaultMaxConcurrent,
+    };
+  });
+}
+
+function extractBindings(config: OpenClawConfig): BindingConfig[] {
+  const ocBindings = config.bindings;
+  if (!ocBindings || ocBindings.length === 0) return [];
+
+  return ocBindings.map((binding): BindingConfig => ({
+    agent: binding.agentId,
+    gateway: binding.match.channel,
+    channel: binding.match.peer.id,
+    bot: binding.match.accountId,
+  }));
+}
+
+function extractBotTokens(config: OpenClawConfig): string[] {
+  const accounts = config.channels?.discord?.accounts;
+  if (!accounts) return [];
+
+  const instructions: string[] = [];
+  for (const [name, account] of Object.entries(accounts)) {
+    const envVar = botTokenEnvVar(name);
+    if (account.token) {
+      instructions.push(`export ${envVar}="<your-token>"`);
+    }
+  }
+
+  return instructions;
+}
+
+async function extractHeartbeats(cronPath: string): Promise<HeartbeatConfig[]> {
+  if (!existsSync(cronPath)) return [];
+
+  try {
+    const raw = await readFile(cronPath, 'utf-8');
+    const data = JSON.parse(raw) as { jobs?: OpenClawCronJob[] };
+    const jobs = data.jobs;
+    if (!jobs || jobs.length === 0) return [];
+
+    // Only extract enabled cron-type jobs (not one-shot "at" jobs)
+    return jobs
+      .filter((job) => job.enabled && job.schedule.kind === 'cron' && job.schedule.expr)
+      .map((job): HeartbeatConfig => ({
+        agent: job.agentId,
+        cron: job.schedule.expr!,
+        tz: job.schedule.tz || 'UTC',
+      }));
+  } catch {
+    return [];
+  }
+}
+
+// ── Init ────────────────────────────────────────────────────────────────────
+
+/**
+ * Interactive setup for new users (no OpenClaw).
+ * Creates the ~/.ccgateway/ structure with a minimal starter config.
+ */
+export async function initNew(): Promise<void> {
+  const { createInterface } = await import('node:readline');
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const ask = (question: string): Promise<string> =>
+    new Promise((resolve) => {
+      rl.question(question, (answer: string) => resolve(answer.trim()));
+    });
+
+  console.log('--- ccgateway init ---');
+  console.log('Setting up a new ccgateway configuration.\n');
+
+  const agentName = (await ask('First agent name [assistant]: ')) || 'assistant';
+  const agentId = agentName.toLowerCase().replace(/\s+/g, '-');
+  const workspace = (await ask(`Workspace directory [${process.cwd()}]: `)) || process.cwd();
+  const model = (await ask('Model [claude-sonnet-4-6]: ')) || 'claude-sonnet-4-6';
+
+  rl.close();
+
+  const config: CcgConfig = {
+    agents: [
+      {
+        id: agentId,
+        name: agentName,
+        emoji: '',
+        workspace,
+        model,
+        skills: [],
+        allowedTools: [...DEFAULT_ALLOWED_TOOLS],
+        maxConcurrentSessions: 4,
+      },
+    ],
+    bindings: [],
+    plugins: [],
+    heartbeats: [],
+  };
+
+  await ensureDirectories();
+  await saveConfig(config);
+
+  console.log(`\nccgateway initialized at: ${process.env.CCG_HOME || join(homedir(), '.ccgateway')}`);
+  console.log(`Agent "${agentId}" created with workspace: ${workspace}`);
+  console.log('\nNext steps:');
+  console.log('  ccg agents list     — see your agents');
+  console.log('  ccg chat <agent>    — start a chat');
+  console.log('  ccg start           — start the daemon');
+}

@@ -14,6 +14,8 @@ import { ContextBuilder } from "./context.js";
 import { CCSpawner } from "./spawner.js";
 import { startChat } from "./chat.js";
 import { HeartbeatManager } from "./heartbeat.js";
+import { startDaemon, stopDaemon, getDaemonStatus } from "./daemon.js";
+import { migrateFromOpenClaw, initNew } from "./migrate.js";
 
 // ── Read version from package.json ──────────────────────────────────────────
 
@@ -33,19 +35,10 @@ program
   .description("ccgateway — multi-agent orchestration layer for Claude Code")
   .version(pkg.version);
 
-// ── Subcommand stubs ────────────────────────────────────────────────────────
+// ── Remaining stubs ─────────────────────────────────────────────────────────
 
 const stubs = [
-  { name: "start", desc: "Start the ccgateway daemon" },
-  { name: "stop", desc: "Stop the ccgateway daemon" },
-  { name: "status", desc: "Show daemon and agent status" },
-  // sessions: implemented below
   { name: "send", desc: "Send a message to an agent" },
-  // chat: implemented below
-  // skills: implemented below
-  // heartbeat: implemented below
-  { name: "migrate", desc: "Run database migrations" },
-  { name: "init", desc: "Initialize ccgateway configuration" },
 ] as const;
 
 for (const stub of stubs) {
@@ -56,6 +49,88 @@ for (const stub of stubs) {
       console.log(`${stub.name}: Not implemented yet`);
     });
 }
+
+// ── start / stop / status ───────────────────────────────────────────────────
+
+program
+  .command("start")
+  .description("Start the ccgateway daemon (foreground)")
+  .action(async () => {
+    try {
+      await startDaemon();
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("stop")
+  .description("Stop the running ccgateway daemon")
+  .action(() => {
+    stopDaemon();
+  });
+
+program
+  .command("status")
+  .description("Show daemon status, PID, and connected gateways")
+  .action(() => {
+    const status = getDaemonStatus();
+
+    if (!status.running) {
+      console.log("ccgateway is not running.");
+      if (status.pid) {
+        console.log(`  Stale PID file references pid=${status.pid}`);
+      }
+      return;
+    }
+
+    console.log("ccgateway is running.");
+    console.log(`  PID:    ${status.pid}`);
+    if (status.uptime !== undefined) {
+      const hours = Math.floor(status.uptime / 3600);
+      const mins = Math.floor((status.uptime % 3600) / 60);
+      const secs = status.uptime % 60;
+      console.log(`  Uptime: ${hours}h ${mins}m ${secs}s`);
+    }
+  });
+
+// ── migrate subcommand ──────────────────────────────────────────────────────
+
+const migrateCmd = program
+  .command("migrate")
+  .description("Migrate configuration from another system");
+
+migrateCmd
+  .command("openclaw")
+  .description("Migrate from OpenClaw configuration")
+  .option("--config <path>", "Path to openclaw.json")
+  .option("--dry-run", "Preview migration without writing files")
+  .action(async (opts) => {
+    try {
+      await migrateFromOpenClaw({
+        configPath: opts.config,
+        dryRun: opts.dryRun,
+      });
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+
+// ── init subcommand ─────────────────────────────────────────────────────────
+
+program
+  .command("init")
+  .description("Initialize ccgateway configuration interactively")
+  .action(async () => {
+    try {
+      await initNew();
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
 
 // ── chat subcommand ───────────────────────────────────────────────────────
 
