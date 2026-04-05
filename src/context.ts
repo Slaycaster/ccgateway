@@ -44,28 +44,49 @@ export class ContextBuilder {
   async build(agentId: string, sessionKey: string): Promise<string> {
     const parts: string[] = [];
 
-    // 0. Agent identity (CLAUDE.md, SOUL.md, IDENTITY.md, AGENTS.md from workspace)
+    // 0. Session context — tell the agent where this conversation is happening
+    parts.push(this.buildSessionInfo(sessionKey));
+
+    // 1. Agent identity (CLAUDE.md, SOUL.md, IDENTITY.md, AGENTS.md from workspace)
     const identitySection = await this.buildIdentitySection(agentId);
     if (identitySection) {
       parts.push(identitySection);
     }
 
-    // 1. Conversation history
+    // 2. Conversation history
     parts.push(await this.buildHistorySection(agentId, sessionKey));
 
-    // 2. Skill index
+    // 3. Skill index
     parts.push(await this.skills.buildSkillIndex(agentId));
 
-    // 3. Inbox messages
+    // 4. Inbox messages
     const inboxSection = await this.buildInboxSection(agentId);
     if (inboxSection) {
       parts.push(inboxSection);
     }
 
-    // 4. Memory section
+    // 5. Memory section
     parts.push(await this.buildMemorySection(agentId));
 
     return parts.join("\n\n");
+  }
+
+  private buildSessionInfo(sessionKey: string): string {
+    // sessionKey format: agentId:source:sourceId
+    const [agentId, source, ...rest] = sessionKey.split(":");
+    const sourceId = rest.join(":");
+    const lines = ["--- Session ---"];
+    lines.push(`Agent: ${agentId}`);
+    lines.push(`Source: ${source}`);
+    if (source === "discord") {
+      lines.push(`Discord channel ID: ${sourceId}`);
+    } else if (source === "slack") {
+      lines.push(`Slack channel ID: ${sourceId}`);
+    } else if (source === "cli") {
+      lines.push("Direct CLI chat session");
+    }
+    lines.push(`Session key: ${sessionKey}`);
+    return lines.join("\n");
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────

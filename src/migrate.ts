@@ -122,7 +122,7 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
   const agents = extractAgents(ocConfig);
 
   // 4. Extract bindings
-  const bindings = extractBindings(ocConfig);
+  const bindings = extractBindings(ocConfig, agents);
 
   // 5. Extract bot tokens + generate .env and plugin config
   const { envLines, pluginBots, instructions: tokenInstructions } = extractBotTokens(ocConfig);
@@ -274,16 +274,76 @@ function extractAgents(config: OpenClawConfig): AgentConfig[] {
   });
 }
 
-function extractBindings(config: OpenClawConfig): BindingConfig[] {
-  const ocBindings = config.bindings;
-  if (!ocBindings || ocBindings.length === 0) return [];
+function extractBindings(config: OpenClawConfig, agents: AgentConfig[]): BindingConfig[] {
+  const bindings: BindingConfig[] = [];
+  const seen = new Set<string>();
 
-  return ocBindings.map((binding): BindingConfig => ({
-    agent: binding.agentId,
-    gateway: binding.match.channel,
-    channel: binding.match.peer.id,
-    bot: binding.match.accountId,
-  }));
+  // 1. Extract from explicit bindings array
+  const ocBindings = config.bindings;
+  if (ocBindings) {
+    for (const binding of ocBindings) {
+      const key = `${binding.match.channel}:${binding.match.peer.id}:${binding.match.accountId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        bindings.push({
+          agent: binding.agentId,
+          gateway: binding.match.channel,
+          channel: binding.match.peer.id,
+          bot: binding.match.accountId,
+        });
+      }
+    }
+  }
+
+  // 2. Extract from channels.discord.accounts.{bot}.guilds.{guild}.channels
+  //    This catches channels that aren't in the bindings array
+  const accounts = config.channels?.discord?.accounts;
+  if (accounts) {
+    // Build a map of bot → agent (first matching agent for each bot)
+    const botToAgent = new Map<string, string>();
+    for (const agent of agents) {
+      // Check if any existing binding maps this bot to an agent
+      const existing = bindings.find((b) => b.bot === agent.id);
+      if (existing) {
+        botToAgent.set(agent.id, existing.agent);
+      }
+    }
+    // Also check explicit bindings for bot→agent mapping
+    if (ocBindings) {
+      for (const b of ocBindings) {
+        botToAgent.set(b.match.accountId, b.agentId);
+      }
+    }
+
+    for (const [botName, acct] of Object.entries(accounts)) {
+      const guilds = (acct as Record<string, unknown>).guilds as Record<string, Record<string, unknown>> | undefined;
+      if (!guilds) continue;
+
+      const agentId = botToAgent.get(botName);
+      if (!agentId) continue;
+
+      for (const guild of Object.values(guilds)) {
+        const channels = guild.channels as Record<string, { enabled?: boolean }> | undefined;
+        if (!channels) continue;
+
+        for (const [chId, chConf] of Object.entries(channels)) {
+          if (!chConf.enabled) continue;
+          const key = `discord:${chId}:${botName}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            bindings.push({
+              agent: agentId,
+              gateway: 'discord',
+              channel: chId,
+              bot: botName,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return bindings;
 }
 
 interface ExtractedTokens {

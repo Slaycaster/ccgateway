@@ -150,6 +150,16 @@ export default function createDiscordGateway(
             logger.info(
               `discord-gateway: bot "${botId}" connected as ${client.user.tag}`,
             );
+            // Log which bound channels this bot can see
+            const botBindings = core.config.bindings.filter(
+              (b) => b.gateway === "discord" && b.bot === botId,
+            );
+            for (const b of botBindings) {
+              const ch = client.channels.cache.get(b.channel);
+              logger.info(
+                `discord-gateway: bot "${botId}" binding ${b.channel} (agent: ${b.agent}) — ${ch ? "visible" : "NOT VISIBLE"}`,
+              );
+            }
           }
         });
 
@@ -208,6 +218,10 @@ export default function createDiscordGateway(
   // ── Internal message handler ──────────────────────────────────────────
 
   async function handleMessage(msg: Message, receivingBotId: string): Promise<void> {
+    logger.info(
+      `discord-gateway: bot "${receivingBotId}" received message in channel ${msg.channelId} from ${msg.author.tag} (bot=${msg.author.bot})`,
+    );
+
     // Ignore all bot messages (prevents feedback loops)
     if (msg.author.bot) {
       return;
@@ -219,6 +233,9 @@ export default function createDiscordGateway(
       (b) => b.gateway === "discord" && b.channel === msg.channelId && b.bot === receivingBotId,
     );
     if (!binding) {
+      logger.info(
+        `discord-gateway: bot "${receivingBotId}" no binding for channel ${msg.channelId}`,
+      );
       return; // this bot is not bound to this channel
     }
     const agentId = binding.agent;
