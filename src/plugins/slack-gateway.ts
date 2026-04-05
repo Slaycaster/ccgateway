@@ -209,8 +209,8 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
 
       logger.info(`slack: bot "${botId}" received message in channel ${channelId} from user ${userId}`);
 
-      // Check if user is allowed
-      if (!pluginConfig.allowedUsers.includes(userId)) {
+      // Check if user is allowed (empty allowedUsers means allow everyone)
+      if (pluginConfig.allowedUsers.length > 0 && !pluginConfig.allowedUsers.includes(userId)) {
         logger.debug(`slack: ignoring message from non-allowed user ${userId}`);
         return;
       }
