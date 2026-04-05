@@ -303,7 +303,7 @@ function extractBotTokens(config: OpenClawConfig): ExtractedTokens {
   for (const [name, account] of Object.entries(accounts)) {
     const envVar = botTokenEnvVar(name);
     if (account.token) {
-      envLines.push(`${envVar}=${account.token}`);
+      envLines.push(`export ${envVar}=${account.token}`);
       pluginBots[name] = { token: `$${envVar}` };
       instructions.push(`  ${envVar} → ${name} bot`);
     }
