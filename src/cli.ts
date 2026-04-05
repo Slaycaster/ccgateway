@@ -18,6 +18,7 @@ import { CrossAgentMessenger } from "./messaging.js";
 import { PluginLoader } from "./plugin.js";
 import { startDaemon, stopDaemon, getDaemonStatus } from "./daemon.js";
 import { migrateFromOpenClaw, initNew } from "./migrate.js";
+import { installService, uninstallService } from "./systemd.js";
 
 // ── Read version from package.json ──────────────────────────────────────────
 
@@ -112,6 +113,32 @@ program
       const mins = Math.floor((status.uptime % 3600) / 60);
       const secs = status.uptime % 60;
       console.log(`  Uptime: ${hours}h ${mins}m ${secs}s`);
+    }
+  });
+
+// ── install / uninstall (systemd) ───────────────────────────────────────────
+
+program
+  .command("install")
+  .description("Install ccgateway as a systemd user service")
+  .action(() => {
+    try {
+      installService();
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("uninstall")
+  .description("Remove the ccgateway systemd user service")
+  .action(() => {
+    try {
+      uninstallService();
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
     }
   });
 

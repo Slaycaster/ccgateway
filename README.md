@@ -8,6 +8,43 @@
 
 You have a Claude Code subscription. You want multiple AI agents with their own identities, Discord/Slack channels, persistent conversations, and cross-agent messaging. ccgateway does that by calling `claude --print` under the hood — no API keys, no third-party harness, just your subscription.
 
+## Quick Start
+
+```bash
+# Install
+npm install -g ccgateway
+
+# New setup
+ccg init
+
+# Or migrate from OpenClaw
+ccg migrate openclaw
+
+# Add your bot tokens to ~/.ccgateway/.env
+# DISCORD_SALT_TOKEN=...
+# SLACK_PEPPER_TOKEN=...
+
+# Start as a background service (systemd)
+ccg install
+
+# Or run in foreground
+source ~/.ccgateway/.env && ccg start
+```
+
+### Service Management
+
+```bash
+ccg install                # Install and start as systemd user service
+ccg uninstall              # Stop and remove the service
+
+# Standard systemd commands also work:
+systemctl --user status  ccgateway
+systemctl --user restart ccgateway
+journalctl --user -u ccgateway -f
+```
+
+`ccg install` creates a systemd user service that auto-starts on boot, restarts on failure, and sources `~/.ccgateway/.env` for bot tokens. Run `loginctl enable-linger $USER` to keep it running after you log out.
+
 ## Why ccgateway
 
 If you're coming from OpenClaw, you already know what multi-agent orchestration looks like. Same agent identities, same Discord channels, same memory files, same workflows. ccgateway gives you all of that running legitimately on Claude Code CLI.
@@ -41,22 +78,6 @@ ccgateway doesn't proxy, wrap, or intercept Claude Code sessions. Every agent in
 | Telegram / WhatsApp | Yes | Roadmap |
 | Browser Tools | Yes | Roadmap |
 | Migration from OpenClaw | — | **One command** |
-
-## Quick Start
-
-```bash
-# Install
-npm install -g ccgateway
-
-# New setup
-ccg init
-
-# Or migrate from OpenClaw
-ccg migrate openclaw
-
-# Load bot tokens and start
-source ~/.ccgateway/.env && ccg start
-```
 
 ## Features
 
@@ -247,6 +268,8 @@ ccg agents list              # Agents
 ccg sessions list            # Active sessions
 ccg skills list              # Available skills
 ccg status                   # Daemon status
+ccg install                  # Install as background service
+ccg uninstall                # Remove background service
 ```
 
 See the [design spec](docs/superpowers/specs/2026-04-05-ccgateway-design.md) for the full configuration reference.
