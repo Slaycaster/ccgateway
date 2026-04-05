@@ -1,6 +1,6 @@
 {
   "name": "ccgateway",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-agent orchestration layer built on Claude Code CLI",
   "type": "module",
   "license": "MIT",
@@ -9,7 +9,17 @@
     "type": "git",
     "url": "https://github.com/Slaycaster/ccgateway"
   },
-  "keywords": ["claude", "claude-code", "agents", "orchestration", "gateway", "cli", "clawdbot", "openclaw", "anthropic"],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "agents",
+    "orchestration",
+    "gateway",
+    "cli",
+    "clawdbot",
+    "openclaw",
+    "anthropic"
+  ],
   "main": "./dist/config.js",
   "types": "./dist/config.d.ts",
   "exports": {
