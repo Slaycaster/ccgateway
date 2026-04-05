@@ -21,11 +21,13 @@ export interface SessionManager {
     agentId: string,
     source: string,
     sourceId: string,
-  ): Promise<string>;
+  ): string;
+  resetSession(agentId: string, sessionKey: string): Promise<void>;
 }
 
 export interface MessageRouter {
   route(message: IncomingMessage): Promise<string>;
+  resolveAgent(gateway: string, channelId: string): string | undefined;
 }
 
 // ── Core API exposed to plugins ────────────────────────────────────────────
