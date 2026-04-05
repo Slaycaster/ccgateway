@@ -1,4 +1,5 @@
 import type { AgentRegistry } from "./agents.js";
+import type { MessageRouter } from "./router.js";
 import type { PluginLoader } from "./plugin.js";
 import type { BindingConfig } from "./config.js";
 import { appendFile, readFile, writeFile, mkdir } from "node:fs/promises";
@@ -17,12 +18,19 @@ export interface InboxMessage {
 // ── CrossAgentMessenger ──────────────────────────────────────────────────
 
 export class CrossAgentMessenger {
+  private router?: MessageRouter;
+
   constructor(
     private agents: AgentRegistry,
     private bindings: BindingConfig[],
     private plugins: PluginLoader,
     private ccgHome: string,
   ) {}
+
+  /** Set the router for internal message routing (called after router is created) */
+  setRouter(router: MessageRouter): void {
+    this.router = router;
+  }
 
   /**
    * Send a message to an agent. Uses channel-native messaging if the agent
@@ -43,20 +51,13 @@ export class CrossAgentMessenger {
     const binding = this.bindings.find((b) => b.agent === toAgentId);
 
     if (binding) {
-      // 2a. Find the gateway plugin that handles this binding's gateway type
+      // 2a. Post to Discord/Slack for human visibility (optional)
       const gatewayPlugins = this.plugins.getPluginsByType("gateway");
       const plugin = gatewayPlugins.find(
         (p) => p.name === `${binding.gateway}-gateway`,
       ) as (Record<string, unknown> | undefined);
 
-      if (
-        plugin &&
-        typeof plugin.sendToChannel === "function"
-      ) {
-        // 2b. Determine which bot to send as.
-        //     If fromAgentId is provided, look for a binding for that agent
-        //     on the same gateway to find their bot identity.
-        //     Fall back to the target binding's bot.
+      if (plugin && typeof plugin.sendToChannel === "function") {
         let senderBotId = binding.bot;
         if (fromAgentId) {
           const senderBinding = this.bindings.find(
@@ -67,14 +68,40 @@ export class CrossAgentMessenger {
           }
         }
 
-        // 2c. Send via gateway plugin
+        // Post to channel so humans can see the cross-agent message
         await (plugin.sendToChannel as (
           channelId: string,
           botId: string,
           content: string,
         ) => Promise<void>)(binding.channel, senderBotId, content);
-        return;
       }
+
+      // 2b. Route internally so the target agent actually processes it.
+      //     Bot messages are ignored by the gateway, so we route directly.
+      if (this.router) {
+        const response = await this.router.route({
+          from: {
+            gateway: "internal",
+            channel: binding.channel,
+            user: fromAgentId || "system",
+            userId: fromAgentId || "system",
+            messageId: `xagent-${Date.now()}`,
+          },
+          to: { agent: toAgentId },
+          content,
+          attachments: [],
+        });
+
+        // Post the agent's response back to their channel for visibility
+        if (plugin && typeof plugin.sendToChannel === "function") {
+          await (plugin.sendToChannel as (
+            channelId: string,
+            botId: string,
+            content: string,
+          ) => Promise<void>)(binding.channel, binding.bot, response);
+        }
+      }
+      return;
     }
 
     // 3. No binding or no usable gateway plugin — fall back to inbox

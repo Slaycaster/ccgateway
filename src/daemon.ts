@@ -64,6 +64,7 @@ export async function startDaemon(): Promise<void> {
     loader,
     ccgHome,
   );
+  messenger.setRouter(router);
 
   // 6. Build CcgCore object for plugins
   const core: CcgCore = {

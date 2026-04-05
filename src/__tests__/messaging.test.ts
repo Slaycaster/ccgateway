@@ -189,9 +189,10 @@ describe("send — inbox fallback", () => {
     expect(msg.read).toBe(false);
   });
 
-  it("falls back to inbox when no gateway plugin is loaded", async () => {
+  it("falls back to inbox when no gateway plugin and no router", async () => {
+    // Agent with no binding → goes straight to inbox
     const noPlugins = createMockPluginLoaderNoGateway();
-    const msg2 = new CrossAgentMessenger(agents, BINDINGS, noPlugins, tmpHome);
+    const msg2 = new CrossAgentMessenger(agents, [], noPlugins, tmpHome);
 
     await msg2.send("pepper", "No plugin available", "salt");
 

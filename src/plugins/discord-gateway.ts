@@ -208,26 +208,25 @@ export default function createDiscordGateway(
   // ── Internal message handler ──────────────────────────────────────────
 
   async function handleMessage(msg: Message, receivingBotId: string): Promise<void> {
-    // Ignore bot messages — unless the bot is one of our own agents
-    if (msg.author.bot && !ownBotUserIds.has(msg.author.id)) {
+    // Ignore all bot messages (prevents feedback loops)
+    if (msg.author.bot) {
       return;
     }
 
-    // Check if user is in allowedUsers (skip check for our own bots — cross-agent)
-    if (!ownBotUserIds.has(msg.author.id)) {
-      if (!pluginConfig.allowedUsers.includes(msg.author.id)) {
-        return;
-      }
-    }
-
-    // Resolve which agent handles this channel via config bindings
+    // Only handle messages if THIS bot is the one bound to this channel.
+    // This prevents "several people typing" — only the correct bot responds.
     const binding = core.config.bindings.find(
-      (b) => b.gateway === "discord" && b.channel === msg.channelId,
+      (b) => b.gateway === "discord" && b.channel === msg.channelId && b.bot === receivingBotId,
     );
     if (!binding) {
-      return; // no binding for this channel
+      return; // this bot is not bound to this channel
     }
     const agentId = binding.agent;
+
+    // Check if user is in allowedUsers
+    if (!pluginConfig.allowedUsers.includes(msg.author.id)) {
+      return;
+    }
 
     // Handle slash commands
     const trimmed = msg.content.trim().toLowerCase();
