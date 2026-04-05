@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.jpg" alt="ccgateway logo" width="600" />
+</p>
+
 # ccgateway
 
 **Multi-agent orchestration for Claude Code CLI.**
