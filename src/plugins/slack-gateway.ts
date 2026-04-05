@@ -6,9 +6,9 @@ import { logger } from "../logger.js";
 // ── Config types ──────────────────────────────────────────────────────────
 
 interface SlackBotConfig {
-  token: string;          // env var reference like "$SLACK_SALT_TOKEN"
-  signingSecret: string;  // env var reference like "$SLACK_SALT_SECRET"
-  appToken: string;       // env var reference like "$SLACK_SALT_APP_TOKEN" (for socket mode)
+  token: string;           // env var reference like "$SLACK_SALT_TOKEN"
+  signingSecret?: string;  // env var reference like "$SLACK_SALT_SECRET" (optional — socket mode uses appToken)
+  appToken: string;        // env var reference like "$SLACK_SALT_APP_TOKEN" (for socket mode)
 }
 
 interface SlackGatewayConfig {
@@ -132,7 +132,7 @@ interface BotInstance {
 export default function createSlackGateway(pluginConfig: SlackGatewayConfig): CcgPlugin {
   let core: CcgCore;
   const bots: BotInstance[] = [];
-  const resolvedTokens = new Map<string, { token: string; signingSecret: string; appToken: string }>();
+  const resolvedTokens = new Map<string, { token: string; signingSecret?: string; appToken: string }>();
 
   /**
    * Send a message to a specific channel using a specific bot.
@@ -313,7 +313,7 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       // Resolve all tokens from env vars
       for (const [botId, botConfig] of Object.entries(pluginConfig.bots)) {
         const token = resolveToken(botConfig.token);
-        const signingSecret = resolveToken(botConfig.signingSecret);
+        const signingSecret = botConfig.signingSecret ? resolveToken(botConfig.signingSecret) : undefined;
         const appToken = resolveToken(botConfig.appToken);
         resolvedTokens.set(botId, { token, signingSecret, appToken });
       }
@@ -327,7 +327,7 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       for (const [botId, tokens] of resolvedTokens.entries()) {
         const app = new App({
           token: tokens.token,
-          signingSecret: tokens.signingSecret,
+          ...(tokens.signingSecret ? { signingSecret: tokens.signingSecret } : {}),
           appToken: tokens.appToken,
           socketMode: true,
           logLevel: "ERROR" as LogLevel,

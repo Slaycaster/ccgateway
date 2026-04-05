@@ -1,14 +1,15 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { glob } from 'node:fs/promises';
 import { saveConfig, ensureDirectories, getCcgHome } from './config.js';
 import type { CcgConfig, AgentConfig, BindingConfig, HeartbeatConfig, PluginEntry } from './config.js';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
 export interface MigrateOptions {
-  configPath?: string;  // custom openclaw.json path
+  configPaths?: string[];  // explicit openclaw.json paths (disables auto-discovery)
   dryRun?: boolean;
 }
 
@@ -40,7 +41,7 @@ interface OpenClawBinding {
   match: {
     channel: string;
     accountId: string;
-    peer: {
+    peer?: {
       kind: string;
       id: string;
     };
@@ -61,6 +62,11 @@ interface OpenClawCronJob {
   [key: string]: unknown;
 }
 
+interface SlackAccountConfig {
+  botToken?: string;
+  appToken?: string;
+}
+
 interface OpenClawConfig {
   agents?: {
     defaults?: {
@@ -75,7 +81,20 @@ interface OpenClawConfig {
     discord?: {
       accounts?: Record<string, { token?: string; [key: string]: unknown }>;
     };
+    slack?: {
+      botToken?: string;
+      appToken?: string;
+      accounts?: Record<string, SlackAccountConfig>;
+    };
   };
+}
+
+// ── Instance representation ─────────────────────────────────────────────────
+
+interface OpenClawInstance {
+  name: string;
+  configPath: string;
+  config: OpenClawConfig;
 }
 
 // ── Migration ───────────────────────────────────────────────────────────────
@@ -101,85 +120,275 @@ export function botTokenEnvVar(accountName: string): string {
 }
 
 /**
+ * Generate Slack bot token env var names.
+ * e.g. "default" -> { token: "SLACK_DEFAULT_TOKEN", appToken: "SLACK_DEFAULT_APP_TOKEN" }
+ */
+export function slackTokenEnvVars(botName: string): { token: string; appToken: string } {
+  const upper = botName.toUpperCase();
+  return {
+    token: `SLACK_${upper}_TOKEN`,
+    appToken: `SLACK_${upper}_APP_TOKEN`,
+  };
+}
+
+/**
+ * Derive an instance name from an openclaw directory path.
+ * ~/.openclaw/openclaw.json        → "openclaw"
+ * ~/.openclaw-sentri/openclaw.json → "sentri"
+ */
+export function deriveInstanceName(configPath: string): string {
+  const dir = basename(dirname(configPath));
+  // Strip leading dot
+  let name = dir.startsWith('.') ? dir.slice(1) : dir;
+  // Strip "openclaw" prefix and leading dash/underscore
+  if (name === 'openclaw') return 'openclaw';
+  if (name.startsWith('openclaw-')) return name.slice('openclaw-'.length);
+  if (name.startsWith('openclaw_')) return name.slice('openclaw_'.length);
+  return name;
+}
+
+/**
+ * Auto-discover OpenClaw instances by globbing ~/.openclaw* /openclaw.json
+ */
+export async function discoverInstances(): Promise<string[]> {
+  const home = homedir();
+  const paths: string[] = [];
+
+  // node:fs/promises glob is available in Node 22+
+  // Fallback to manual scanning if not available
+  try {
+    for await (const entry of glob(join(home, '.openclaw*', 'openclaw.json'))) {
+      paths.push(entry);
+    }
+  } catch {
+    // Fallback: check the default path
+    const defaultPath = join(home, '.openclaw', 'openclaw.json');
+    if (existsSync(defaultPath)) {
+      paths.push(defaultPath);
+    }
+  }
+
+  return paths.sort();
+}
+
+/**
+ * Resolve agent ID collisions across multiple instances.
+ * Returns a map from "instanceName:originalId" → "resolvedId".
+ * Only renames when there's an actual collision.
+ */
+export function resolveCollisions(
+  instanceAgents: Array<{ instanceName: string; agents: AgentConfig[] }>,
+): { renames: Map<string, string>; summary: string[] } {
+  // Count how many instances define each agent ID
+  const idCount = new Map<string, number>();
+  for (const { agents } of instanceAgents) {
+    for (const agent of agents) {
+      idCount.set(agent.id, (idCount.get(agent.id) || 0) + 1);
+    }
+  }
+
+  const renames = new Map<string, string>();
+  const summary: string[] = [];
+
+  for (const { instanceName, agents } of instanceAgents) {
+    for (const agent of agents) {
+      const key = `${instanceName}:${agent.id}`;
+      if (idCount.get(agent.id)! > 1) {
+        const newId = `${instanceName}-${agent.id}`;
+        renames.set(key, newId);
+        summary.push(`  ${agent.id} (${instanceName}) → ${newId}`);
+        agent.id = newId;
+      } else {
+        renames.set(key, agent.id);
+      }
+    }
+  }
+
+  return { renames, summary };
+}
+
+/**
  * Migrate from OpenClaw configuration to ccgateway config.
+ * Supports multi-instance discovery and merging.
  */
 export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise<void> {
-  // 1. Find openclaw.json
-  const configFile = options.configPath || join(homedir(), '.openclaw', 'openclaw.json');
+  // 1. Discover or use explicit config paths
+  let configPaths: string[];
 
-  if (!existsSync(configFile)) {
+  if (options.configPaths && options.configPaths.length > 0) {
+    configPaths = options.configPaths;
+  } else {
+    configPaths = await discoverInstances();
+  }
+
+  if (configPaths.length === 0) {
     throw new Error(
-      `OpenClaw config not found at: ${configFile}\n` +
+      `No OpenClaw config found. Looked for ~/.openclaw*/openclaw.json\n` +
       `Specify the path with: ccg migrate openclaw --config <path>`,
     );
   }
 
-  // 2. Read and parse
-  const raw = await readFile(configFile, 'utf-8');
-  const ocConfig: OpenClawConfig = JSON.parse(raw);
+  // 2. Load all instances
+  const instances: OpenClawInstance[] = [];
+  for (const configPath of configPaths) {
+    if (!existsSync(configPath)) {
+      throw new Error(
+        `OpenClaw config not found at: ${configPath}\n` +
+        `Specify the path with: ccg migrate openclaw --config <path>`,
+      );
+    }
+    const raw = await readFile(configPath, 'utf-8');
+    const config: OpenClawConfig = JSON.parse(raw);
+    const name = deriveInstanceName(configPath);
+    instances.push({ name, configPath, config });
+  }
 
-  // 3. Extract agents
-  const agents = extractAgents(ocConfig);
+  // 3. Extract agents from each instance (with synthesis for missing agents.list)
+  const instanceAgents: Array<{ instanceName: string; agents: AgentConfig[] }> = [];
+  for (const instance of instances) {
+    const agents = extractAgents(instance.config, instance.name);
+    instanceAgents.push({ instanceName: instance.name, agents });
+  }
 
-  // 4. Extract bindings
-  const bindings = extractBindings(ocConfig, agents);
+  // 4. Resolve agent ID collisions across all instances
+  const { renames, summary: renameSummary } = resolveCollisions(instanceAgents);
 
-  // 5. Extract bot tokens + generate .env and plugin config
-  const { envLines, pluginBots, instructions: tokenInstructions } = extractBotTokens(ocConfig);
+  // 5. Flatten all agents
+  const allAgents: AgentConfig[] = instanceAgents.flatMap(ia => ia.agents);
 
-  // 6. Extract guild ID for Discord plugin config
-  const guildId = extractGuildId(ocConfig);
+  // 6. Extract bindings, tokens, heartbeats from each instance (using resolved IDs)
+  const allBindings: BindingConfig[] = [];
+  const allEnvLines: string[] = [];
+  const allInstructions: string[] = [];
+  const allHeartbeats: HeartbeatConfig[] = [];
+  const allSlackBots: Record<string, { token: string; appToken: string }> = {};
+  const allDiscordBots: Record<string, { token: string }> = {};
+  const bindingSeen = new Set<string>();
+  let guildId: string | undefined;
+  const allAllowedUsers: Set<string> = new Set();
 
-  // 7. Build Discord gateway plugin entry if we have bots
+  for (const instance of instances) {
+    const renameForInstance = (originalId: string): string => {
+      return renames.get(`${instance.name}:${originalId}`) || originalId;
+    };
+
+    // Bindings
+    const bindings = extractBindings(instance.config, allAgents, renameForInstance);
+    for (const b of bindings) {
+      const key = `${b.gateway}:${b.channel}:${b.bot}`;
+      if (!bindingSeen.has(key)) {
+        bindingSeen.add(key);
+        allBindings.push(b);
+      }
+    }
+
+    // Slack bindings from account structure
+    const slackBindings = extractSlackBindings(instance.config, instance.name, renameForInstance, allBindings);
+    for (const b of slackBindings) {
+      const key = `${b.gateway}:${b.channel}:${b.bot}`;
+      if (!bindingSeen.has(key)) {
+        bindingSeen.add(key);
+        allBindings.push(b);
+      }
+    }
+
+    // Discord tokens
+    const discord = extractDiscordBotTokens(instance.config);
+    for (const [name, bot] of Object.entries(discord.pluginBots)) {
+      allDiscordBots[name] = bot;
+    }
+    allEnvLines.push(...discord.envLines);
+    allInstructions.push(...discord.instructions);
+
+    // Slack tokens
+    const slack = extractSlackBotTokens(instance.config, instance.name);
+    for (const [name, bot] of Object.entries(slack.pluginBots)) {
+      allSlackBots[name] = bot;
+    }
+    allEnvLines.push(...slack.envLines);
+    allInstructions.push(...slack.instructions);
+
+    // Guild ID (first found)
+    if (!guildId) {
+      guildId = extractGuildId(instance.config);
+    }
+
+    // Allowed users
+    for (const u of extractAllowedUsers(instance.config)) {
+      allAllowedUsers.add(u);
+    }
+
+    // Heartbeats
+    const cronPath = join(dirname(instance.configPath), 'cron', 'jobs.json');
+    const heartbeats = await extractHeartbeats(cronPath, renameForInstance);
+    allHeartbeats.push(...heartbeats);
+  }
+
+  // 7. Build plugin entries
   const plugins: PluginEntry[] = [];
-  if (Object.keys(pluginBots).length > 0) {
+
+  if (Object.keys(allDiscordBots).length > 0) {
     plugins.push({
       name: 'discord-gateway',
       enabled: true,
       config: {
-        bots: pluginBots,
+        bots: allDiscordBots,
         guild: guildId || '',
-        allowedUsers: extractAllowedUsers(ocConfig),
+        allowedUsers: [...allAllowedUsers],
         commands: ['/new', '/reset', '/status'],
       },
     });
   }
 
-  // 8. Extract heartbeats from cron/jobs.json
-  const cronPath = join(
-    options.configPath
-      ? join(options.configPath, '..', 'cron', 'jobs.json')
-      : join(homedir(), '.openclaw', 'cron', 'jobs.json'),
-  );
-  const heartbeats = await extractHeartbeats(cronPath);
+  if (Object.keys(allSlackBots).length > 0) {
+    plugins.push({
+      name: 'slack-gateway',
+      enabled: true,
+      config: {
+        bots: allSlackBots,
+        workspace: '',
+        allowedUsers: [...allAllowedUsers],
+        commands: ['/new', '/reset', '/status'],
+      },
+    });
+  }
 
-  // 9. Build ccgateway config
+  // 8. Build ccgateway config
   const ccgConfig: CcgConfig = {
-    agents,
-    bindings,
+    agents: allAgents,
+    bindings: allBindings,
     plugins,
-    heartbeats,
+    heartbeats: allHeartbeats,
   };
 
-  // 10. Print summary
+  // 9. Print summary
   console.log('--- OpenClaw Migration Summary ---');
-  console.log(`  Agents:     ${agents.length}`);
-  console.log(`  Bindings:   ${bindings.length}`);
+  console.log(`  Instances:  ${instances.length} (${instances.map(i => i.name).join(', ')})`);
+  console.log(`  Agents:     ${allAgents.length}`);
+  console.log(`  Bindings:   ${allBindings.length}`);
   console.log(`  Plugins:    ${plugins.length}`);
-  console.log(`  Heartbeats: ${heartbeats.length}`);
+  console.log(`  Heartbeats: ${allHeartbeats.length}`);
   console.log();
 
-  if (agents.length > 0) {
+  if (renameSummary.length > 0) {
+    console.log('Agent ID renames (collision resolution):');
+    for (const line of renameSummary) {
+      console.log(line);
+    }
+    console.log();
+  }
+
+  if (allAgents.length > 0) {
     console.log('Agents:');
-    for (const a of agents) {
+    for (const a of allAgents) {
       console.log(`  ${a.emoji || '-'} ${a.id} (${a.name}) — model: ${a.model}, workspace: ${a.workspace}`);
     }
     console.log();
   }
 
-  if (bindings.length > 0) {
+  if (allBindings.length > 0) {
     console.log('Bindings:');
-    for (const b of bindings) {
+    for (const b of allBindings) {
       console.log(`  ${b.agent} <- ${b.gateway}:${b.channel} (bot: ${b.bot})`);
     }
     console.log();
@@ -193,38 +402,38 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
     console.log();
   }
 
-  if (heartbeats.length > 0) {
+  if (allHeartbeats.length > 0) {
     console.log('Heartbeats:');
-    for (const h of heartbeats) {
+    for (const h of allHeartbeats) {
       console.log(`  ${h.agent}: ${h.cron} (${h.tz})`);
     }
     console.log();
   }
 
-  if (envLines.length > 0) {
-    console.log(`Bot tokens found: ${envLines.length}`);
-    for (const line of tokenInstructions) {
+  if (allEnvLines.length > 0) {
+    console.log(`Bot tokens found: ${allEnvLines.length}`);
+    for (const line of allInstructions) {
       console.log(line);
     }
     console.log();
   }
 
-  // 11. Dry run check
+  // 10. Dry run check
   if (options.dryRun) {
     console.log('[dry-run] No files were written.');
     return;
   }
 
-  // 12. Save config, .env, and ensure directories
+  // 11. Save config, .env, and ensure directories
   await ensureDirectories();
   await saveConfig(ccgConfig);
 
   const home = getCcgHome();
 
   // Write .env with actual bot tokens
-  if (envLines.length > 0) {
+  if (allEnvLines.length > 0) {
     const envPath = join(home, '.env');
-    await writeFile(envPath, envLines.join('\n') + '\n', 'utf-8');
+    await writeFile(envPath, allEnvLines.join('\n') + '\n', 'utf-8');
     console.log(`Bot tokens written to: ${envPath}`);
   }
 
@@ -238,27 +447,33 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
 
 // ── Extraction helpers ──────────────────────────────────────────────────────
 
-function extractAgents(config: OpenClawConfig): AgentConfig[] {
-  const list = config.agents?.list;
-  if (!list || list.length === 0) return [];
-
+function extractAgents(config: OpenClawConfig, instanceName: string): AgentConfig[] {
   const defaults = config.agents?.defaults;
   const defaultModel = defaults?.model?.primary || 'claude-sonnet-4-6';
   const defaultWorkspace = defaults?.workspace || homedir();
   const defaultMaxConcurrent = defaults?.maxConcurrent || 4;
 
+  const list = config.agents?.list;
+
+  // Synthesize a single agent if no agents.list
+  if (!list || list.length === 0) {
+    return [{
+      id: instanceName,
+      name: instanceName,
+      emoji: '',
+      workspace: defaultWorkspace,
+      model: stripModelPrefix(defaultModel),
+      skills: [],
+      allowedTools: [...DEFAULT_ALLOWED_TOOLS],
+      maxConcurrentSessions: defaultMaxConcurrent,
+    }];
+  }
+
   return list.map((agent): AgentConfig => {
-    // Determine model: agent-level override or default
     const rawModel = agent.model?.primary || defaultModel;
     const model = stripModelPrefix(rawModel);
-
-    // Determine workspace: agent-level override or default
     const workspace = agent.workspace || defaultWorkspace;
-
-    // Agent name: identity.name or the agent id
     const name = agent.identity?.name || agent.name || agent.id;
-
-    // Emoji
     const emoji = agent.identity?.emoji || '';
 
     return {
@@ -274,7 +489,11 @@ function extractAgents(config: OpenClawConfig): AgentConfig[] {
   });
 }
 
-function extractBindings(config: OpenClawConfig, agents: AgentConfig[]): BindingConfig[] {
+function extractBindings(
+  config: OpenClawConfig,
+  agents: AgentConfig[],
+  renameId: (id: string) => string,
+): BindingConfig[] {
   const bindings: BindingConfig[] = [];
   const seen = new Set<string>();
 
@@ -282,13 +501,14 @@ function extractBindings(config: OpenClawConfig, agents: AgentConfig[]): Binding
   const ocBindings = config.bindings;
   if (ocBindings) {
     for (const binding of ocBindings) {
-      const key = `${binding.match.channel}:${binding.match.peer.id}:${binding.match.accountId}`;
+      const channelId = binding.match.peer?.id ?? '*';
+      const key = `${binding.match.channel}:${channelId}:${binding.match.accountId}`;
       if (!seen.has(key)) {
         seen.add(key);
         bindings.push({
-          agent: binding.agentId,
+          agent: renameId(binding.agentId),
           gateway: binding.match.channel,
-          channel: binding.match.peer.id,
+          channel: channelId,
           bot: binding.match.accountId,
         });
       }
@@ -296,22 +516,19 @@ function extractBindings(config: OpenClawConfig, agents: AgentConfig[]): Binding
   }
 
   // 2. Extract from channels.discord.accounts.{bot}.guilds.{guild}.channels
-  //    This catches channels that aren't in the bindings array
   const accounts = config.channels?.discord?.accounts;
   if (accounts) {
     // Build a map of bot → agent (first matching agent for each bot)
     const botToAgent = new Map<string, string>();
     for (const agent of agents) {
-      // Check if any existing binding maps this bot to an agent
       const existing = bindings.find((b) => b.bot === agent.id);
       if (existing) {
         botToAgent.set(agent.id, existing.agent);
       }
     }
-    // Also check explicit bindings for bot→agent mapping
     if (ocBindings) {
       for (const b of ocBindings) {
-        botToAgent.set(b.match.accountId, b.agentId);
+        botToAgent.set(b.match.accountId, renameId(b.agentId));
       }
     }
 
@@ -346,13 +563,71 @@ function extractBindings(config: OpenClawConfig, agents: AgentConfig[]): Binding
   return bindings;
 }
 
-interface ExtractedTokens {
-  envLines: string[];       // Lines for .env file (VAR=value)
-  pluginBots: Record<string, { token: string }>;  // For plugin config ($VAR references)
-  instructions: string[];   // Human-readable summary
+/**
+ * Extract Slack bindings from channels.slack.accounts structure.
+ * Each account that maps to an agent gets a gateway:'slack' binding with channel:'*'.
+ */
+function extractSlackBindings(
+  config: OpenClawConfig,
+  instanceName: string,
+  renameId: (id: string) => string,
+  existingBindings: BindingConfig[],
+): BindingConfig[] {
+  const bindings: BindingConfig[] = [];
+  const slack = config.channels?.slack;
+  if (!slack) return bindings;
+
+  // Build bot→agent map from explicit bindings
+  const botToAgent = new Map<string, string>();
+  const ocBindings = config.bindings;
+  if (ocBindings) {
+    for (const b of ocBindings) {
+      if (b.match.channel === 'slack') {
+        botToAgent.set(b.match.accountId, renameId(b.agentId));
+      }
+    }
+  }
+
+  if (slack.accounts) {
+    // Pattern 1: Multi-bot accounts
+    for (const accountName of Object.keys(slack.accounts)) {
+      const agentId = botToAgent.get(accountName);
+      if (agentId) {
+        bindings.push({
+          agent: agentId,
+          gateway: 'slack',
+          channel: '*',
+          bot: accountName,
+        });
+      }
+    }
+  } else if (slack.botToken) {
+    // Pattern 2: Top-level single bot — named after instance
+    const agentId = botToAgent.get(instanceName) || renameId(instanceName);
+    bindings.push({
+      agent: agentId,
+      gateway: 'slack',
+      channel: '*',
+      bot: instanceName,
+    });
+  }
+
+  return bindings;
 }
 
-function extractBotTokens(config: OpenClawConfig): ExtractedTokens {
+interface ExtractedTokens {
+  envLines: string[];
+  pluginBots: Record<string, { token: string }>;
+  instructions: string[];
+}
+
+interface ExtractedSlackTokens {
+  envLines: string[];
+  pluginBots: Record<string, { token: string; appToken: string }>;
+  instructions: string[];
+}
+
+function extractDiscordBotTokens(config: OpenClawConfig): ExtractedTokens {
   const accounts = config.channels?.discord?.accounts;
   if (!accounts) return { envLines: [], pluginBots: {}, instructions: [] };
 
@@ -372,10 +647,52 @@ function extractBotTokens(config: OpenClawConfig): ExtractedTokens {
   return { envLines, pluginBots, instructions };
 }
 
+/**
+ * Extract Slack bot tokens from an instance's config.
+ * Handles both Pattern 1 (multi-bot accounts) and Pattern 2 (top-level single bot).
+ */
+function extractSlackBotTokens(config: OpenClawConfig, instanceName: string): ExtractedSlackTokens {
+  const slack = config.channels?.slack;
+  if (!slack) return { envLines: [], pluginBots: {}, instructions: [] };
+
+  const envLines: string[] = [];
+  const pluginBots: Record<string, { token: string; appToken: string }> = {};
+  const instructions: string[] = [];
+
+  if (slack.accounts) {
+    // Pattern 1: Multi-bot accounts
+    for (const [name, account] of Object.entries(slack.accounts)) {
+      const vars = slackTokenEnvVars(name);
+      if (account.botToken) {
+        envLines.push(`export ${vars.token}=${account.botToken}`);
+        envLines.push(`export ${vars.appToken}=${account.appToken || ''}`);
+        pluginBots[name] = {
+          token: `$${vars.token}`,
+          appToken: `$${vars.appToken}`,
+        };
+        instructions.push(`  ${vars.token} → ${name} bot`);
+        instructions.push(`  ${vars.appToken} → ${name} app`);
+      }
+    }
+  } else if (slack.botToken) {
+    // Pattern 2: Top-level single bot — named after instance
+    const vars = slackTokenEnvVars(instanceName);
+    envLines.push(`export ${vars.token}=${slack.botToken}`);
+    envLines.push(`export ${vars.appToken}=${slack.appToken || ''}`);
+    pluginBots[instanceName] = {
+      token: `$${vars.token}`,
+      appToken: `$${vars.appToken}`,
+    };
+    instructions.push(`  ${vars.token} → ${instanceName} bot`);
+    instructions.push(`  ${vars.appToken} → ${instanceName} app`);
+  }
+
+  return { envLines, pluginBots, instructions };
+}
+
 function extractGuildId(config: OpenClawConfig): string | undefined {
   const accounts = config.channels?.discord?.accounts;
   if (!accounts) return undefined;
-  // Take the first guild ID found across any account
   for (const account of Object.values(accounts)) {
     const guilds = (account as Record<string, unknown>).guilds as Record<string, unknown> | undefined;
     if (guilds) {
@@ -387,25 +704,31 @@ function extractGuildId(config: OpenClawConfig): string | undefined {
 }
 
 function extractAllowedUsers(config: OpenClawConfig): string[] {
-  const accounts = config.channels?.discord?.accounts;
-  if (!accounts) return [];
-  // Collect unique user IDs from all guild user lists
   const users = new Set<string>();
-  for (const account of Object.values(accounts)) {
-    const guilds = (account as Record<string, unknown>).guilds as Record<string, Record<string, unknown>> | undefined;
-    if (guilds) {
-      for (const guild of Object.values(guilds)) {
-        const guildUsers = guild.users as string[] | undefined;
-        if (guildUsers) {
-          for (const u of guildUsers) users.add(u);
+
+  // Discord users
+  const discordAccounts = config.channels?.discord?.accounts;
+  if (discordAccounts) {
+    for (const account of Object.values(discordAccounts)) {
+      const guilds = (account as Record<string, unknown>).guilds as Record<string, Record<string, unknown>> | undefined;
+      if (guilds) {
+        for (const guild of Object.values(guilds)) {
+          const guildUsers = guild.users as string[] | undefined;
+          if (guildUsers) {
+            for (const u of guildUsers) users.add(u);
+          }
         }
       }
     }
   }
+
   return [...users];
 }
 
-async function extractHeartbeats(cronPath: string): Promise<HeartbeatConfig[]> {
+async function extractHeartbeats(
+  cronPath: string,
+  renameId: (id: string) => string,
+): Promise<HeartbeatConfig[]> {
   if (!existsSync(cronPath)) return [];
 
   try {
@@ -414,11 +737,10 @@ async function extractHeartbeats(cronPath: string): Promise<HeartbeatConfig[]> {
     const jobs = data.jobs;
     if (!jobs || jobs.length === 0) return [];
 
-    // Only extract enabled cron-type jobs (not one-shot "at" jobs)
     return jobs
       .filter((job) => job.enabled && job.schedule.kind === 'cron' && job.schedule.expr)
       .map((job): HeartbeatConfig => ({
-        agent: job.agentId,
+        agent: renameId(job.agentId),
         cron: job.schedule.expr!,
         tz: job.schedule.tz || 'UTC',
       }));

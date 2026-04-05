@@ -124,12 +124,12 @@ const migrateCmd = program
 migrateCmd
   .command("openclaw")
   .description("Migrate from OpenClaw configuration")
-  .option("--config <path>", "Path to openclaw.json")
+  .option("--config <path...>", "Path(s) to openclaw.json (repeatable)")
   .option("--dry-run", "Preview migration without writing files")
   .action(async (opts) => {
     try {
       await migrateFromOpenClaw({
-        configPath: opts.config,
+        configPaths: opts.config,
         dryRun: opts.dryRun,
       });
     } catch (err) {

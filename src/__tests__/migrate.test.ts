@@ -7,7 +7,11 @@ import {
   migrateFromOpenClaw,
   stripModelPrefix,
   botTokenEnvVar,
+  slackTokenEnvVars,
+  deriveInstanceName,
+  resolveCollisions,
 } from "../migrate.js";
+import type { AgentConfig } from "../config.js";
 
 // ── Test setup ──────────────────────────────────────────────────────────────
 
@@ -26,7 +30,7 @@ afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
 
-// ── Helper: create mock openclaw.json ──────────────────────────────────────
+// ── Helper: create mock openclaw instances ──────────────────────────────────
 
 function mockOpenClawConfig() {
   return {
@@ -157,6 +161,7 @@ function mockCronJobs() {
   };
 }
 
+/** Write a single mock openclaw instance and return its config path. */
 async function writeMockFiles(
   ocConfig?: unknown,
   cronJobs?: unknown,
@@ -169,6 +174,31 @@ async function writeMockFiles(
 
   if (cronJobs !== undefined) {
     const cronDir = join(openclawDir, "cron");
+    await mkdir(cronDir, { recursive: true });
+    await writeFile(join(cronDir, "jobs.json"), JSON.stringify(cronJobs), "utf-8");
+  }
+
+  return configPath;
+}
+
+/**
+ * Write a named mock openclaw instance under tempDir/.openclaw-{name}/
+ * or tempDir/.openclaw/ for the default instance.
+ */
+async function writeNamedInstance(
+  name: string,
+  ocConfig: unknown,
+  cronJobs?: unknown,
+): Promise<string> {
+  const dirName = name === "openclaw" ? ".openclaw" : `.openclaw-${name}`;
+  const dir = join(tempDir, dirName);
+  await mkdir(dir, { recursive: true });
+
+  const configPath = join(dir, "openclaw.json");
+  await writeFile(configPath, JSON.stringify(ocConfig), "utf-8");
+
+  if (cronJobs !== undefined) {
+    const cronDir = join(dir, "cron");
     await mkdir(cronDir, { recursive: true });
     await writeFile(join(cronDir, "jobs.json"), JSON.stringify(cronJobs), "utf-8");
   }
@@ -216,62 +246,171 @@ describe("botTokenEnvVar", () => {
   });
 });
 
-// ── Tests: migrateFromOpenClaw ──────────────────────────────────────────────
+// ── Tests: slackTokenEnvVars ────────────────────────────────────────────────
+
+describe("slackTokenEnvVars", () => {
+  it("generates correct env var names for default", () => {
+    const vars = slackTokenEnvVars("default");
+    expect(vars.token).toBe("SLACK_DEFAULT_TOKEN");
+    expect(vars.appToken).toBe("SLACK_DEFAULT_APP_TOKEN");
+  });
+
+  it("generates correct env var names for vilma", () => {
+    const vars = slackTokenEnvVars("vilma");
+    expect(vars.token).toBe("SLACK_VILMA_TOKEN");
+    expect(vars.appToken).toBe("SLACK_VILMA_APP_TOKEN");
+  });
+
+  it("uppercases the bot name", () => {
+    const vars = slackTokenEnvVars("myBot");
+    expect(vars.token).toBe("SLACK_MYBOT_TOKEN");
+    expect(vars.appToken).toBe("SLACK_MYBOT_APP_TOKEN");
+  });
+});
+
+// ── Tests: deriveInstanceName ───────────────────────────────────────────────
+
+describe("deriveInstanceName", () => {
+  it('derives "openclaw" from ~/.openclaw/openclaw.json', () => {
+    expect(deriveInstanceName("/home/user/.openclaw/openclaw.json")).toBe("openclaw");
+  });
+
+  it('derives "sentri" from ~/.openclaw-sentri/openclaw.json', () => {
+    expect(deriveInstanceName("/home/user/.openclaw-sentri/openclaw.json")).toBe("sentri");
+  });
+
+  it('derives "fpj" from ~/.openclaw-fpj/openclaw.json', () => {
+    expect(deriveInstanceName("/home/user/.openclaw-fpj/openclaw.json")).toBe("fpj");
+  });
+
+  it("handles non-dot directory", () => {
+    expect(deriveInstanceName("/tmp/testdir/openclaw.json")).toBe("testdir");
+  });
+});
+
+// ── Tests: resolveCollisions ────────────────────────────────────────────────
+
+describe("resolveCollisions", () => {
+  it("does not rename unique agent IDs", () => {
+    const instanceAgents = [
+      {
+        instanceName: "openclaw",
+        agents: [{ id: "ginger" } as AgentConfig],
+      },
+      {
+        instanceName: "sentri",
+        agents: [{ id: "vilma" } as AgentConfig],
+      },
+    ];
+
+    const { renames, summary } = resolveCollisions(instanceAgents);
+
+    expect(renames.get("openclaw:ginger")).toBe("ginger");
+    expect(renames.get("sentri:vilma")).toBe("vilma");
+    expect(summary).toHaveLength(0);
+    expect(instanceAgents[0].agents[0].id).toBe("ginger");
+    expect(instanceAgents[1].agents[0].id).toBe("vilma");
+  });
+
+  it("renames colliding agent IDs with instance prefix", () => {
+    const instanceAgents = [
+      {
+        instanceName: "openclaw",
+        agents: [{ id: "main" } as AgentConfig],
+      },
+      {
+        instanceName: "sentri",
+        agents: [{ id: "main" } as AgentConfig],
+      },
+    ];
+
+    const { renames, summary } = resolveCollisions(instanceAgents);
+
+    expect(renames.get("openclaw:main")).toBe("openclaw-main");
+    expect(renames.get("sentri:main")).toBe("sentri-main");
+    expect(summary).toHaveLength(2);
+    expect(instanceAgents[0].agents[0].id).toBe("openclaw-main");
+    expect(instanceAgents[1].agents[0].id).toBe("sentri-main");
+  });
+
+  it("only renames colliding IDs — unique IDs stay untouched", () => {
+    const instanceAgents = [
+      {
+        instanceName: "openclaw",
+        agents: [
+          { id: "main" } as AgentConfig,
+          { id: "ginger" } as AgentConfig,
+        ],
+      },
+      {
+        instanceName: "sentri",
+        agents: [
+          { id: "main" } as AgentConfig,
+          { id: "vilma" } as AgentConfig,
+        ],
+      },
+    ];
+
+    const { renames } = resolveCollisions(instanceAgents);
+
+    expect(renames.get("openclaw:main")).toBe("openclaw-main");
+    expect(renames.get("sentri:main")).toBe("sentri-main");
+    expect(renames.get("openclaw:ginger")).toBe("ginger");
+    expect(renames.get("sentri:vilma")).toBe("vilma");
+  });
+});
+
+// ── Tests: migrateFromOpenClaw (single instance) ──────────────────────────
 
 describe("migrateFromOpenClaw", () => {
   it("throws helpful error when openclaw.json is missing", async () => {
     await expect(
-      migrateFromOpenClaw({ configPath: "/nonexistent/path/openclaw.json" }),
+      migrateFromOpenClaw({ configPaths: ["/nonexistent/path/openclaw.json"] }),
     ).rejects.toThrow("OpenClaw config not found");
   });
 
-  it("extracts agents correctly", async () => {
+  it("extracts agents correctly (dry-run)", async () => {
     const configPath = await writeMockFiles();
-    await migrateFromOpenClaw({ configPath, dryRun: true });
-
-    // In dry-run mode, no config file is written, but we can verify
-    // the function completes without error (the real assertions are
-    // in the non-dry-run test below).
+    await migrateFromOpenClaw({ configPaths: [configPath], dryRun: true });
+    // Completes without error
   });
 
   it("writes config file with correct agents on non-dry-run", async () => {
     const configPath = await writeMockFiles(mockOpenClawConfig(), mockCronJobs());
-    await migrateFromOpenClaw({ configPath });
+    await migrateFromOpenClaw({ configPaths: [configPath] });
 
-    // Verify config was written
     const ccgConfigPath = join(ccgHome, "config.json");
     expect(existsSync(ccgConfigPath)).toBe(true);
 
     const raw = await readFile(ccgConfigPath, "utf-8");
     const config = JSON.parse(raw);
 
-    // Verify agents
     expect(config.agents).toHaveLength(3);
 
     const main = config.agents.find((a: { id: string }) => a.id === "main");
     expect(main).toBeDefined();
     expect(main.name).toBe("Ginger");
     expect(main.emoji).toBe("\u{1FAD0}");
-    expect(main.workspace).toBe("/home/user/clawd"); // from defaults
-    expect(main.model).toBe("claude-opus-4-6"); // stripped anthropic/ prefix
+    expect(main.workspace).toBe("/home/user/clawd");
+    expect(main.model).toBe("claude-opus-4-6");
 
     const salt = config.agents.find((a: { id: string }) => a.id === "salt");
     expect(salt).toBeDefined();
     expect(salt.name).toBe("Salt");
     expect(salt.emoji).toBe("\u{1F9C2}");
-    expect(salt.workspace).toBe("/home/user/clawd-salt"); // agent-level override
-    expect(salt.model).toBe("claude-sonnet-4-6"); // agent-level model, stripped
+    expect(salt.workspace).toBe("/home/user/clawd-salt");
+    expect(salt.model).toBe("claude-sonnet-4-6");
 
     const pepper = config.agents.find((a: { id: string }) => a.id === "pepper");
     expect(pepper).toBeDefined();
     expect(pepper.name).toBe("Pepper");
     expect(pepper.workspace).toBe("/home/user/clawd-pepper");
-    expect(pepper.model).toBe("claude-opus-4-6"); // falls back to default
+    expect(pepper.model).toBe("claude-opus-4-6");
   });
 
   it("extracts bindings correctly", async () => {
     const configPath = await writeMockFiles(mockOpenClawConfig(), mockCronJobs());
-    await migrateFromOpenClaw({ configPath });
+    await migrateFromOpenClaw({ configPaths: [configPath] });
 
     const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
     const config = JSON.parse(raw);
@@ -291,13 +430,11 @@ describe("migrateFromOpenClaw", () => {
 
   it("extracts heartbeats from cron jobs (enabled cron-type only)", async () => {
     const configPath = await writeMockFiles(mockOpenClawConfig(), mockCronJobs());
-    await migrateFromOpenClaw({ configPath });
+    await migrateFromOpenClaw({ configPaths: [configPath] });
 
     const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
     const config = JSON.parse(raw);
 
-    // Only enabled cron-type jobs: main and salt heartbeats
-    // pepper-heartbeat is disabled, one-shot-reminder is "at" type
     expect(config.heartbeats).toHaveLength(2);
 
     const mainHb = config.heartbeats.find((h: { agent: string }) => h.agent === "main");
@@ -311,16 +448,15 @@ describe("migrateFromOpenClaw", () => {
 
   it("dry run does not write files", async () => {
     const configPath = await writeMockFiles();
-    await migrateFromOpenClaw({ configPath, dryRun: true });
+    await migrateFromOpenClaw({ configPaths: [configPath], dryRun: true });
 
     const ccgConfigPath = join(ccgHome, "config.json");
     expect(existsSync(ccgConfigPath)).toBe(false);
   });
 
   it("handles missing cron/jobs.json gracefully", async () => {
-    // Write config without cron jobs
     const configPath = await writeMockFiles(mockOpenClawConfig());
-    await migrateFromOpenClaw({ configPath });
+    await migrateFromOpenClaw({ configPaths: [configPath] });
 
     const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
     const config = JSON.parse(raw);
@@ -356,7 +492,7 @@ describe("migrateFromOpenClaw", () => {
     };
 
     const configPath = await writeMockFiles(ocConfig);
-    await migrateFromOpenClaw({ configPath });
+    await migrateFromOpenClaw({ configPaths: [configPath] });
 
     const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
     const config = JSON.parse(raw);
@@ -368,10 +504,517 @@ describe("migrateFromOpenClaw", () => {
 
   it("creates standard directories on migration", async () => {
     const configPath = await writeMockFiles();
-    await migrateFromOpenClaw({ configPath });
+    await migrateFromOpenClaw({ configPaths: [configPath] });
 
     for (const dir of ["agents", "skills", "plugins", "logs"]) {
       expect(existsSync(join(ccgHome, dir))).toBe(true);
     }
+  });
+
+  it("handles bindings with missing peer (Slack-style)", async () => {
+    const ocConfig = {
+      agents: {
+        list: [
+          { id: "bot1", identity: { name: "Bot1" } },
+        ],
+      },
+      bindings: [
+        {
+          agentId: "bot1",
+          match: {
+            channel: "slack",
+            accountId: "default",
+            // no peer — Slack bindings don't have one
+          },
+        },
+      ],
+    };
+
+    const configPath = await writeMockFiles(ocConfig);
+    await migrateFromOpenClaw({ configPaths: [configPath] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    const binding = config.bindings.find((b: { gateway: string }) => b.gateway === "slack");
+    expect(binding).toBeDefined();
+    expect(binding.channel).toBe("*");
+    expect(binding.agent).toBe("bot1");
+  });
+});
+
+// ── Tests: synthesized agents ───────────────────────────────────────────────
+
+describe("synthesized agents", () => {
+  it("synthesizes a single agent when no agents.list exists", async () => {
+    const ocConfig = {
+      agents: {
+        defaults: {
+          model: { primary: "anthropic/claude-sonnet-4-6" },
+          workspace: "/home/user/project",
+          maxConcurrent: 2,
+        },
+      },
+      channels: {
+        slack: {
+          botToken: "xoxb-synth-token",
+          appToken: "xapp-synth-token",
+        },
+      },
+    };
+
+    const configPath = await writeNamedInstance("sentri", ocConfig);
+    await migrateFromOpenClaw({ configPaths: [configPath] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    expect(config.agents).toHaveLength(1);
+
+    const agent = config.agents[0];
+    expect(agent.id).toBe("sentri");
+    expect(agent.name).toBe("sentri");
+    expect(agent.model).toBe("claude-sonnet-4-6");
+    expect(agent.workspace).toBe("/home/user/project");
+    expect(agent.maxConcurrentSessions).toBe(2);
+  });
+
+  it("synthesized agent uses fallback defaults when no agents.defaults", async () => {
+    const ocConfig = {
+      channels: {
+        slack: {
+          botToken: "xoxb-bare",
+          appToken: "xapp-bare",
+        },
+      },
+    };
+
+    const configPath = await writeNamedInstance("bare", ocConfig);
+    await migrateFromOpenClaw({ configPaths: [configPath] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    const agent = config.agents[0];
+    expect(agent.id).toBe("bare");
+    expect(agent.model).toBe("claude-sonnet-4-6");
+    expect(agent.maxConcurrentSessions).toBe(4);
+  });
+});
+
+// ── Tests: Slack token extraction ───────────────────────────────────────────
+
+describe("Slack token extraction", () => {
+  it("extracts Pattern 1: multi-bot accounts", async () => {
+    const ocConfig = {
+      agents: {
+        list: [
+          { id: "default", identity: { name: "Default" } },
+          { id: "vilma", identity: { name: "Vilma" } },
+        ],
+      },
+      bindings: [
+        {
+          agentId: "default",
+          match: { channel: "slack", accountId: "default" },
+        },
+        {
+          agentId: "vilma",
+          match: { channel: "slack", accountId: "vilma" },
+        },
+      ],
+      channels: {
+        slack: {
+          accounts: {
+            default: { botToken: "xoxb-default-123", appToken: "xapp-default-456" },
+            vilma: { botToken: "xoxb-vilma-789", appToken: "xapp-vilma-012" },
+          },
+        },
+      },
+    };
+
+    const configPath = await writeMockFiles(ocConfig);
+    await migrateFromOpenClaw({ configPaths: [configPath] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    // Should have slack-gateway plugin
+    const slackPlugin = config.plugins.find((p: { name: string }) => p.name === "slack-gateway");
+    expect(slackPlugin).toBeDefined();
+    expect(slackPlugin.config.bots.default).toEqual({
+      token: "$SLACK_DEFAULT_TOKEN",
+      appToken: "$SLACK_DEFAULT_APP_TOKEN",
+    });
+    expect(slackPlugin.config.bots.vilma).toEqual({
+      token: "$SLACK_VILMA_TOKEN",
+      appToken: "$SLACK_VILMA_APP_TOKEN",
+    });
+
+    // Check .env
+    const envContent = await readFile(join(ccgHome, ".env"), "utf-8");
+    expect(envContent).toContain("export SLACK_DEFAULT_TOKEN=xoxb-default-123");
+    expect(envContent).toContain("export SLACK_DEFAULT_APP_TOKEN=xapp-default-456");
+    expect(envContent).toContain("export SLACK_VILMA_TOKEN=xoxb-vilma-789");
+    expect(envContent).toContain("export SLACK_VILMA_APP_TOKEN=xapp-vilma-012");
+  });
+
+  it("extracts Pattern 2: top-level single bot", async () => {
+    const ocConfig = {
+      agents: {
+        list: [
+          { id: "sentri", identity: { name: "Sentri" } },
+        ],
+      },
+      channels: {
+        slack: {
+          botToken: "xoxb-sentri-token",
+          appToken: "xapp-sentri-token",
+        },
+      },
+    };
+
+    const configPath = await writeNamedInstance("sentri", ocConfig);
+    await migrateFromOpenClaw({ configPaths: [configPath] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    // Plugin should name the bot after the instance
+    const slackPlugin = config.plugins.find((p: { name: string }) => p.name === "slack-gateway");
+    expect(slackPlugin).toBeDefined();
+    expect(slackPlugin.config.bots.sentri).toEqual({
+      token: "$SLACK_SENTRI_TOKEN",
+      appToken: "$SLACK_SENTRI_APP_TOKEN",
+    });
+
+    // Check .env
+    const envContent = await readFile(join(ccgHome, ".env"), "utf-8");
+    expect(envContent).toContain("export SLACK_SENTRI_TOKEN=xoxb-sentri-token");
+    expect(envContent).toContain("export SLACK_SENTRI_APP_TOKEN=xapp-sentri-token");
+  });
+
+  it("generates both slack-gateway and discord-gateway plugins when both exist", async () => {
+    const ocConfig = {
+      agents: {
+        list: [
+          { id: "main", identity: { name: "Main" } },
+        ],
+      },
+      bindings: [
+        {
+          agentId: "main",
+          match: { channel: "discord", accountId: "ginger", peer: { kind: "channel", id: "ch1" } },
+        },
+        {
+          agentId: "main",
+          match: { channel: "slack", accountId: "default" },
+        },
+      ],
+      channels: {
+        discord: {
+          accounts: {
+            ginger: { token: "discord-token-123" },
+          },
+        },
+        slack: {
+          accounts: {
+            default: { botToken: "xoxb-test", appToken: "xapp-test" },
+          },
+        },
+      },
+    };
+
+    const configPath = await writeMockFiles(ocConfig);
+    await migrateFromOpenClaw({ configPaths: [configPath] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    expect(config.plugins).toHaveLength(2);
+
+    const names = config.plugins.map((p: { name: string }) => p.name).sort();
+    expect(names).toEqual(["discord-gateway", "slack-gateway"]);
+  });
+});
+
+// ── Tests: multi-instance migration ─────────────────────────────────────────
+
+describe("multi-instance migration", () => {
+  it("merges two instances with no collisions", async () => {
+    const instance1 = {
+      agents: {
+        list: [
+          { id: "ginger", identity: { name: "Ginger" } },
+        ],
+      },
+      channels: {
+        discord: {
+          accounts: { ginger: { token: "discord-ginger-token" } },
+        },
+      },
+    };
+
+    const instance2 = {
+      agents: {
+        list: [
+          { id: "vilma", identity: { name: "Vilma" } },
+        ],
+      },
+      channels: {
+        slack: {
+          botToken: "xoxb-vilma",
+          appToken: "xapp-vilma",
+        },
+      },
+    };
+
+    const path1 = await writeNamedInstance("openclaw", instance1);
+    const path2 = await writeNamedInstance("sentri", instance2);
+
+    await migrateFromOpenClaw({ configPaths: [path1, path2] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    // Both agents present, no renames
+    expect(config.agents).toHaveLength(2);
+    expect(config.agents.find((a: { id: string }) => a.id === "ginger")).toBeDefined();
+    expect(config.agents.find((a: { id: string }) => a.id === "vilma")).toBeDefined();
+
+    // Both plugins
+    expect(config.plugins).toHaveLength(2);
+  });
+
+  it("resolves agent ID collisions across instances", async () => {
+    const instance1 = {
+      agents: {
+        list: [
+          { id: "main", identity: { name: "Ginger" } },
+          { id: "ginger", identity: { name: "Ginger Alt" } },
+        ],
+      },
+    };
+
+    const instance2 = {
+      agents: {
+        list: [
+          { id: "main", identity: { name: "Sentri Main" } },
+          { id: "vilma", identity: { name: "Vilma" } },
+        ],
+      },
+    };
+
+    const path1 = await writeNamedInstance("openclaw", instance1);
+    const path2 = await writeNamedInstance("sentri", instance2);
+
+    await migrateFromOpenClaw({ configPaths: [path1, path2] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    expect(config.agents).toHaveLength(4);
+
+    // "main" collides → renamed
+    expect(config.agents.find((a: { id: string }) => a.id === "openclaw-main")).toBeDefined();
+    expect(config.agents.find((a: { id: string }) => a.id === "sentri-main")).toBeDefined();
+
+    // Unique IDs stay
+    expect(config.agents.find((a: { id: string }) => a.id === "ginger")).toBeDefined();
+    expect(config.agents.find((a: { id: string }) => a.id === "vilma")).toBeDefined();
+  });
+
+  it("heartbeat agent IDs use post-collision-resolution names", async () => {
+    const instance1 = {
+      agents: {
+        list: [{ id: "main", identity: { name: "Ginger" } }],
+      },
+    };
+
+    const instance2 = {
+      agents: {
+        list: [{ id: "main", identity: { name: "Sentri" } }],
+      },
+    };
+
+    const cronJobs = {
+      jobs: [
+        {
+          id: "hb-1",
+          agentId: "main",
+          name: "heartbeat",
+          enabled: true,
+          schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" },
+        },
+      ],
+    };
+
+    const path1 = await writeNamedInstance("openclaw", instance1, cronJobs);
+    const path2 = await writeNamedInstance("sentri", instance2, cronJobs);
+
+    await migrateFromOpenClaw({ configPaths: [path1, path2] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    expect(config.heartbeats).toHaveLength(2);
+    const agents = config.heartbeats.map((h: { agent: string }) => h.agent).sort();
+    expect(agents).toEqual(["openclaw-main", "sentri-main"]);
+  });
+
+  it("bindings use post-collision-resolution agent IDs", async () => {
+    const instance1 = {
+      agents: {
+        list: [{ id: "main", identity: { name: "Ginger" } }],
+      },
+      bindings: [
+        {
+          agentId: "main",
+          match: { channel: "discord", accountId: "ginger", peer: { kind: "channel", id: "ch1" } },
+        },
+      ],
+      channels: {
+        discord: { accounts: { ginger: { token: "tok1" } } },
+      },
+    };
+
+    const instance2 = {
+      agents: {
+        list: [{ id: "main", identity: { name: "Sentri" } }],
+      },
+      bindings: [
+        {
+          agentId: "main",
+          match: { channel: "slack", accountId: "default" },
+        },
+      ],
+      channels: {
+        slack: {
+          accounts: {
+            default: { botToken: "xoxb-test", appToken: "xapp-test" },
+          },
+        },
+      },
+    };
+
+    const path1 = await writeNamedInstance("openclaw", instance1);
+    const path2 = await writeNamedInstance("sentri", instance2);
+
+    await migrateFromOpenClaw({ configPaths: [path1, path2] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    const discordBinding = config.bindings.find((b: { gateway: string }) => b.gateway === "discord");
+    expect(discordBinding.agent).toBe("openclaw-main");
+
+    const slackBinding = config.bindings.find((b: { gateway: string; channel: string }) =>
+      b.gateway === "slack" && b.channel === "*",
+    );
+    expect(slackBinding).toBeDefined();
+    expect(slackBinding.agent).toBe("sentri-main");
+  });
+
+  it("merges .env from all instances", async () => {
+    const instance1 = {
+      agents: { list: [{ id: "ginger" }] },
+      channels: {
+        discord: { accounts: { ginger: { token: "discord-tok" } } },
+      },
+    };
+
+    const instance2 = {
+      agents: { list: [{ id: "vilma" }] },
+      channels: {
+        slack: {
+          accounts: {
+            vilma: { botToken: "xoxb-vilma", appToken: "xapp-vilma" },
+          },
+        },
+      },
+    };
+
+    const path1 = await writeNamedInstance("openclaw", instance1);
+    const path2 = await writeNamedInstance("sentri", instance2);
+
+    await migrateFromOpenClaw({ configPaths: [path1, path2] });
+
+    const envContent = await readFile(join(ccgHome, ".env"), "utf-8");
+    expect(envContent).toContain("DISCORD_GINGER_TOKEN=discord-tok");
+    expect(envContent).toContain("SLACK_VILMA_TOKEN=xoxb-vilma");
+    expect(envContent).toContain("SLACK_VILMA_APP_TOKEN=xapp-vilma");
+  });
+
+  it("deduplicates bindings by gateway:channel:bot key", async () => {
+    const instance1 = {
+      agents: { list: [{ id: "bot1" }] },
+      bindings: [
+        {
+          agentId: "bot1",
+          match: { channel: "discord", accountId: "ginger", peer: { kind: "channel", id: "ch1" } },
+        },
+      ],
+    };
+
+    // instance2 has a binding with the same gateway:channel:bot
+    const instance2 = {
+      agents: { list: [{ id: "bot2" }] },
+      bindings: [
+        {
+          agentId: "bot2",
+          match: { channel: "discord", accountId: "ginger", peer: { kind: "channel", id: "ch1" } },
+        },
+      ],
+    };
+
+    const path1 = await writeNamedInstance("openclaw", instance1);
+    const path2 = await writeNamedInstance("sentri", instance2);
+
+    await migrateFromOpenClaw({ configPaths: [path1, path2] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    // Only one binding for discord:ch1:ginger (first one wins)
+    const discordBindings = config.bindings.filter(
+      (b: { gateway: string; channel: string; bot: string }) =>
+        b.gateway === "discord" && b.channel === "ch1" && b.bot === "ginger",
+    );
+    expect(discordBindings).toHaveLength(1);
+  });
+
+  it("skips kind:every interval jobs silently", async () => {
+    const ocConfig = {
+      agents: { list: [{ id: "agent1" }] },
+    };
+
+    const cronJobs = {
+      jobs: [
+        {
+          id: "cron-1",
+          agentId: "agent1",
+          name: "cron-job",
+          enabled: true,
+          schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" },
+        },
+        {
+          id: "every-1",
+          agentId: "agent1",
+          name: "every-job",
+          enabled: true,
+          schedule: { kind: "every", expr: "30m" },
+        },
+      ],
+    };
+
+    const path = await writeNamedInstance("openclaw", ocConfig, cronJobs);
+    await migrateFromOpenClaw({ configPaths: [path] });
+
+    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
+    const config = JSON.parse(raw);
+
+    expect(config.heartbeats).toHaveLength(1);
+    expect(config.heartbeats[0].agent).toBe("agent1");
+    expect(config.heartbeats[0].cron).toBe("0 9 * * *");
   });
 });
