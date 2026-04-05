@@ -207,16 +207,21 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       const messageTs = message.ts;
       const threadTs = "thread_ts" in message ? message.thread_ts : undefined;
 
+      logger.info(`slack: bot "${botId}" received message in channel ${channelId} from user ${userId}`);
+
       // Check if user is allowed
       if (!pluginConfig.allowedUsers.includes(userId)) {
         logger.debug(`slack: ignoring message from non-allowed user ${userId}`);
         return;
       }
 
-      // Resolve agent from bindings
-      const agentId = core.router.resolveAgent("slack", channelId);
+      // Resolve agent from bindings — try exact channel first, then fall back
+      // to bot-level binding (needed for Slack DMs where channel IDs are dynamic)
+      const agentId =
+        core.router.resolveAgent("slack", channelId) ??
+        core.router.resolveAgentByBot("slack", botId);
       if (!agentId) {
-        logger.debug(`slack: no agent bound to channel ${channelId}`);
+        logger.debug(`slack: no agent bound to channel ${channelId} or bot ${botId}`);
         return;
       }
 

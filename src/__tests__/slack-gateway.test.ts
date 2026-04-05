@@ -109,6 +109,7 @@ function stubCore(overrides: Partial<CcgCore> = {}): CcgCore {
       resolveAgent: vi.fn((gateway: string, channelId: string) =>
         gateway === "slack" && channelId === "C001" ? "salt" : undefined,
       ),
+      resolveAgentByBot: vi.fn(() => undefined),
     },
     send: vi.fn(async () => {}),
     ...overrides,
@@ -611,6 +612,7 @@ describe("slack-gateway message handling", () => {
         resolveAgent: vi.fn((_g: string, _c: string) =>
           _g === "slack" && _c === "C001" ? "salt" : undefined,
         ),
+        resolveAgentByBot: vi.fn(() => undefined),
       },
     } as any);
     const say = vi.fn(async () => ({}));
@@ -641,6 +643,7 @@ describe("slack-gateway message handling", () => {
         resolveAgent: vi.fn((_g: string, _c: string) =>
           _g === "slack" && _c === "C001" ? "salt" : undefined,
         ),
+        resolveAgentByBot: vi.fn(() => undefined),
       },
     } as any);
     const say = vi.fn(async () => ({}));

@@ -27,6 +27,17 @@ export class MessageRouter {
   }
 
   /**
+   * Resolve agent by gateway + bot ID (fallback for gateways like Slack
+   * where DM channel IDs are dynamic and won't match a static binding).
+   */
+  resolveAgentByBot(gateway: string, botId: string): string | undefined {
+    const binding = this.bindings.find(
+      (b) => b.gateway === gateway && b.bot === botId,
+    );
+    return binding?.agent;
+  }
+
+  /**
    * Full message dispatch pipeline.
    *
    * 1. Look up agent config from registry
