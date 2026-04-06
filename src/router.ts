@@ -1,8 +1,10 @@
 import type { AgentRegistry } from "./agents.js";
+import type { AsyncTaskWatcher } from "./async-watcher.js";
 import type { SessionManager } from "./sessions.js";
 import type { ContextBuilder } from "./context.js";
 import type { CCSpawner, ImageInput } from "./spawner.js";
 import type { IncomingMessage, Attachment, BindingConfig } from "./types.js";
+import { getCcgHome } from "./config.js";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,6 +18,7 @@ export class MessageRouter {
     private context: ContextBuilder,
     private spawner: CCSpawner,
     private bindings: BindingConfig[],
+    private watcher?: AsyncTaskWatcher,
   ) {}
 
   /**
@@ -106,7 +109,47 @@ export class MessageRouter {
     // 5. Build context
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
-    // 6. Spawn claude --print
+    // 5.5 Triage: should this run async?
+    const mode = this.watcher
+      ? await this.spawner.triage(messageContent, agent.model)
+      : ("sync" as const);
+
+    if (mode === "async") {
+      const { sessionName, taskDir } = await this.spawner.spawnAsync({
+        workspace: agent.workspace,
+        message: messageContent,
+        systemPrompt,
+        model: agent.model,
+        ccgHome: getCcgHome(),
+        agentId,
+      });
+
+      // Register with watcher
+      const binding = this.bindings.find((b) => b.agent === agentId);
+      this.watcher!.register({
+        sessionName,
+        taskDir,
+        agentId,
+        gateway: message.from.gateway,
+        channel: message.from.channel,
+        botId: binding?.bot ?? agentId,
+        sessionKey,
+        workspace: agent.workspace,
+        startedAt: Date.now(),
+      });
+
+      const placeholder = `[async] Task dispatched to tmux session \`${sessionName}\`. I'll post the result here when done.`;
+      await this.sessions.appendMessage(agentId, sessionKey, {
+        role: "assistant",
+        content: placeholder,
+        ts: Date.now(),
+        tokens: { in: 0, out: 0 },
+      });
+
+      return placeholder;
+    }
+
+    // 6. Spawn claude --print (sync path — unchanged)
     const result = await this.spawner.spawn({
       workspace: agent.workspace,
       message: messageContent,

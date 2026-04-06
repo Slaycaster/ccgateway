@@ -6,6 +6,7 @@ import type { SessionManager } from "../sessions.js";
 import type { ContextBuilder } from "../context.js";
 import type { CCSpawner } from "../spawner.js";
 import type { SpawnResult } from "../spawner.js";
+import type { AsyncTaskWatcher } from "../async-watcher.js";
 
 // ── Test data ─────────────────────────────────────────────────────────────
 
@@ -99,7 +100,22 @@ function createMockSpawner(result?: Partial<SpawnResult>): CCSpawner {
   };
   return {
     spawn: vi.fn(async () => ({ ...defaultResult, ...result })),
+    triage: vi.fn(async () => "sync" as const),
+    spawnAsync: vi.fn(async () => ({
+      sessionName: "ccg-salt-a3f2",
+      taskDir: "/tmp/async-tasks/ccg-salt-a3f2",
+    })),
   } as unknown as CCSpawner;
+}
+
+function createMockWatcher(): AsyncTaskWatcher {
+  return {
+    register: vi.fn(),
+    listTasks: vi.fn(() => []),
+    start: vi.fn(),
+    stop: vi.fn(),
+    isRunning: vi.fn(() => true),
+  } as unknown as AsyncTaskWatcher;
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────
@@ -108,6 +124,7 @@ let agents: ReturnType<typeof createMockAgents>;
 let sessions: ReturnType<typeof createMockSessions>;
 let context: ReturnType<typeof createMockContext>;
 let spawner: ReturnType<typeof createMockSpawner>;
+let watcher: ReturnType<typeof createMockWatcher>;
 let router: MessageRouter;
 
 beforeEach(() => {
@@ -115,12 +132,14 @@ beforeEach(() => {
   sessions = createMockSessions();
   context = createMockContext();
   spawner = createMockSpawner();
+  watcher = createMockWatcher();
   router = new MessageRouter(
     agents,
     sessions,
     context,
     spawner,
     [BINDING_DISCORD, BINDING_SLACK, BINDING_PEPPER],
+    watcher,
   );
 });
 
@@ -422,5 +441,85 @@ describe("getPrimaryBinding", () => {
   it("returns undefined for agent with no bindings", () => {
     const binding = router.getPrimaryBinding("nonexistent");
     expect(binding).toBeUndefined();
+  });
+});
+
+// ── route — async path ───────────────────────────────────────────────────
+
+describe("route — async path", () => {
+  it("dispatches to tmux when triage returns async", async () => {
+    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("async");
+
+    const message = makeMessage({ content: "Refactor the entire auth system" });
+    const result = await router.route(message);
+
+    expect(spawner.triage).toHaveBeenCalled();
+    expect(spawner.spawnAsync).toHaveBeenCalled();
+    expect(spawner.spawn).not.toHaveBeenCalled();
+    expect(watcher.register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionName: "ccg-salt-a3f2",
+        agentId: "salt",
+        channel: "123456",
+      }),
+    );
+    expect(result).toContain("[async]");
+    expect(result).toContain("ccg-salt-a3f2");
+  });
+
+  it("uses sync path when triage returns sync", async () => {
+    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("sync");
+
+    const message = makeMessage({ content: "What does this function do?" });
+    await router.route(message);
+
+    expect(spawner.triage).toHaveBeenCalled();
+    expect(spawner.spawn).toHaveBeenCalled();
+    expect(spawner.spawnAsync).not.toHaveBeenCalled();
+  });
+
+  it("passes correct options to spawnAsync", async () => {
+    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("async");
+
+    const message = makeMessage();
+    await router.route(message);
+
+    expect(spawner.spawnAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspace: AGENT_SALT.workspace,
+        model: "sonnet",
+        agentId: "salt",
+      }),
+    );
+  });
+
+  it("appends async placeholder to session history", async () => {
+    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("async");
+
+    const message = makeMessage();
+    await router.route(message);
+
+    const appendCalls = (sessions.appendMessage as ReturnType<typeof vi.fn>).mock.calls;
+    expect(appendCalls).toHaveLength(2); // user + async placeholder
+    const assistantMsg = appendCalls[1][2];
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.content).toContain("[async]");
+  });
+
+  it("skips triage when no watcher is configured", async () => {
+    // Create router without watcher
+    const routerNoWatcher = new MessageRouter(
+      agents,
+      sessions,
+      context,
+      spawner,
+      [BINDING_DISCORD, BINDING_SLACK, BINDING_PEPPER],
+    );
+
+    const message = makeMessage();
+    await routerNoWatcher.route(message);
+
+    expect(spawner.triage).not.toHaveBeenCalled();
+    expect(spawner.spawn).toHaveBeenCalled();
   });
 });
