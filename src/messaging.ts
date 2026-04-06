@@ -5,6 +5,7 @@ import type { BindingConfig } from "./config.js";
 import { appendFile, readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { logger } from "./logger.js";
 
 // ── Inbox types ──────────────────────────────────────────────────────────
 
@@ -14,6 +15,14 @@ export interface InboxMessage {
   ts: number;
   read: boolean;
 }
+
+// ── Helper types ─────────────────────────────────────────────────────────
+
+type SendToChannelFn = (
+  channelId: string,
+  botId: string,
+  content: string,
+) => Promise<void>;
 
 // ── CrossAgentMessenger ──────────────────────────────────────────────────
 
@@ -33,8 +42,13 @@ export class CrossAgentMessenger {
   }
 
   /**
-   * Send a message to an agent. Uses channel-native messaging if the agent
-   * has a gateway binding, otherwise falls back to file-based inbox.
+   * Send a message to an agent. The request is posted to the target's
+   * channel for visibility, then the target agent processes it **in the
+   * background**. When done, the response is posted to both the target's
+   * channel and the sender's channel.
+   *
+   * Returns immediately after posting the request — does NOT block waiting
+   * for the target agent to finish.
    */
   async send(
     toAgentId: string,
@@ -51,13 +65,10 @@ export class CrossAgentMessenger {
     const binding = this.bindings.find((b) => b.agent === toAgentId);
 
     if (binding) {
-      // 2a. Post to Discord/Slack for human visibility (optional)
-      const gatewayPlugins = this.plugins.getPluginsByType("gateway");
-      const plugin = gatewayPlugins.find(
-        (p) => p.name === `${binding.gateway}-gateway`,
-      ) as (Record<string, unknown> | undefined);
+      const sendToChannel = this.getSendToChannel(binding.gateway);
 
-      if (plugin && typeof plugin.sendToChannel === "function") {
+      // 2. Post the request to the target's channel for human visibility
+      if (sendToChannel) {
         let senderBotId = binding.bot;
         if (fromAgentId) {
           const senderBinding = this.bindings.find(
@@ -68,57 +79,117 @@ export class CrossAgentMessenger {
           }
         }
 
-        // Post to channel so humans can see the cross-agent message
-        await (plugin.sendToChannel as (
-          channelId: string,
-          botId: string,
-          content: string,
-        ) => Promise<void>)(binding.channel, senderBotId, content);
+        await sendToChannel(binding.channel, senderBotId, content);
       }
 
-      // 2b. Route internally so the target agent actually processes it.
-      //     Bot messages are ignored by the gateway, so we route directly.
+      // 3. Route in the background — don't block the caller.
+      //    Uses spawnStreaming (via onChunk no-op) for activity-based timeout.
       if (this.router) {
-        const response = await this.router.route({
-          from: {
-            gateway: "internal",
-            channel: binding.channel,
-            user: fromAgentId || "system",
-            userId: fromAgentId || "system",
-            messageId: `xagent-${Date.now()}`,
-          },
-          to: { agent: toAgentId },
+        this.routeInBackground(
+          toAgentId,
           content,
-          attachments: [],
-        });
+          fromAgentId,
+          binding,
+          sendToChannel,
+        );
+      }
 
-        if (plugin && typeof plugin.sendToChannel === "function") {
-          const sendToChannel = plugin.sendToChannel as (
-            channelId: string,
-            botId: string,
-            content: string,
-          ) => Promise<void>;
+      return;
+    }
 
-          // Post the agent's response in their own channel for visibility
+    // 4. No binding or no usable gateway plugin — fall back to inbox
+    await this.sendToInbox(toAgentId, content, fromAgentId);
+  }
+
+  /**
+   * Route a cross-agent message in the background and post the response
+   * to both the target's channel and the sender's channel when done.
+   */
+  private routeInBackground(
+    toAgentId: string,
+    content: string,
+    fromAgentId: string | undefined,
+    binding: BindingConfig,
+    sendToChannel: SendToChannelFn | null,
+  ): void {
+    // Fire and forget — errors are logged, not thrown
+    void (async () => {
+      try {
+        // Use a no-op onChunk to trigger spawnStreaming (activity-based timeout)
+        const response = await this.router!.route(
+          {
+            from: {
+              gateway: "internal",
+              channel: binding.channel,
+              user: fromAgentId || "system",
+              userId: fromAgentId || "system",
+              messageId: `xagent-${Date.now()}`,
+            },
+            to: { agent: toAgentId },
+            content,
+            attachments: [],
+          },
+          () => {}, // no-op onChunk — enables streaming/activity timeout
+        );
+
+        if (sendToChannel) {
+          // Post the agent's response in their own channel
           await sendToChannel(binding.channel, binding.bot, response);
 
-          // Post the response back to the sender's channel so they see the reply.
-          // Bot messages are ignored by the gateway handler, so this won't loop.
+          // Post the response back to the sender's channel so they see the reply
           if (fromAgentId) {
             const senderBinding = this.bindings.find(
               (b) => b.agent === fromAgentId && b.gateway === binding.gateway,
             );
             if (senderBinding && senderBinding.channel !== binding.channel) {
-              await sendToChannel(senderBinding.channel, binding.bot, response);
+              await sendToChannel(
+                senderBinding.channel,
+                binding.bot,
+                `[from ${toAgentId}] ${response}`,
+              );
             }
           }
         }
-      }
-      return;
-    }
 
-    // 3. No binding or no usable gateway plugin — fall back to inbox
-    await this.sendToInbox(toAgentId, content, fromAgentId);
+        logger.info(
+          `messaging: cross-agent ${fromAgentId || "system"} → ${toAgentId} completed`,
+        );
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger.error(
+          `messaging: cross-agent ${fromAgentId || "system"} → ${toAgentId} failed: ${errMsg}`,
+        );
+
+        // Post error to sender's channel if possible
+        if (sendToChannel && fromAgentId) {
+          const senderBinding = this.bindings.find(
+            (b) => b.agent === fromAgentId && b.gateway === binding.gateway,
+          );
+          if (senderBinding) {
+            await sendToChannel(
+              senderBinding.channel,
+              binding.bot,
+              `⚠️ Cross-agent message to ${toAgentId} failed: ${errMsg}`,
+            ).catch(() => {});
+          }
+        }
+      }
+    })();
+  }
+
+  /**
+   * Get the sendToChannel function for a gateway, if available.
+   */
+  private getSendToChannel(gateway: string): SendToChannelFn | null {
+    const gatewayPlugins = this.plugins.getPluginsByType("gateway");
+    const plugin = gatewayPlugins.find(
+      (p) => p.name === `${gateway}-gateway`,
+    ) as (Record<string, unknown> | undefined);
+
+    if (plugin && typeof plugin.sendToChannel === "function") {
+      return plugin.sendToChannel as SendToChannelFn;
+    }
+    return null;
   }
 
   /**

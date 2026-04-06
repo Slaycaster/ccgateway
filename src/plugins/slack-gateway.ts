@@ -23,8 +23,8 @@ interface SlackGatewayConfig {
 /** Minimum interval between Slack message updates (rate-limit safe). */
 const UPDATE_THROTTLE_MS = 1500;
 
-/** Slack message character limit (practical safe limit). */
-const SLACK_CHAR_LIMIT = 3900;
+/** Slack section block text limit. */
+const SECTION_TEXT_LIMIT = 3000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -95,10 +95,10 @@ export function markdownToMrkdwn(md: string): string {
 }
 
 /**
- * Split a message into chunks that fit within Slack's character limit.
- * Prefers splitting at newline boundaries.
+ * Split a message into chunks that fit within Slack's section block text
+ * limit (3000 chars). Prefers splitting at newline boundaries.
  */
-export function splitMessage(text: string, maxLen = 3900): string[] {
+export function splitMessage(text: string, maxLen = SECTION_TEXT_LIMIT): string[] {
   if (text.length <= maxLen) return [text];
 
   const chunks: string[] = [];
@@ -128,6 +128,18 @@ export function splitMessage(text: string, maxLen = 3900): string[] {
   return chunks;
 }
 
+/**
+ * Build Slack blocks from mrkdwn text, splitting into multiple section
+ * blocks if the text exceeds the 3000-char section limit.
+ */
+function buildBlocks(mrkdwn: string): Array<{ type: "section"; text: { type: "mrkdwn"; text: string } }> {
+  const chunks = splitMessage(mrkdwn);
+  return chunks.map((chunk) => ({
+    type: "section" as const,
+    text: { type: "mrkdwn" as const, text: chunk },
+  }));
+}
+
 // ── Stored app state (per bot) ────────────────────────────────────────────
 
 interface BotInstance {
@@ -144,6 +156,9 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
 
   // Per-channel message queue — prevents concurrent spawns for the same channel.
   const channelLocks = new Map<string, Promise<void>>();
+
+  // Message deduplication — socket mode can replay events during reconnection.
+  const seenMessages = new Set<string>();
 
   /**
    * Send a message to a specific channel using a specific bot.
@@ -185,9 +200,6 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       case "/new":
       case "/reset": {
         const sessionKey = core.sessions.getOrCreateSession(agentId, "slack", channelId);
-        // SessionManager.resetSession expects (agentId, sessionKey)
-        // but the interface exposed via CcgCore only has getOrCreateSession.
-        // We just create a new session reference which effectively resets context.
         return `Session reset for agent *${agentId}* in this channel.`;
       }
       case "/status": {
@@ -204,13 +216,24 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
    * Register message and event handlers for a single bot App.
    */
   function registerHandlers(app: App, botId: string): void {
-    // Handle messages
     app.message(async ({ message, say, client }) => {
       // Ignore bot messages and message_changed subtypes
       if (!message || message.subtype) return;
 
       // message type narrowing — we only handle standard user messages
       if (!("user" in message) || !("text" in message)) return;
+
+      // Deduplicate — socket mode can replay events during reconnection.
+      // Key includes botId so different bots can still process the same message.
+      const msgTs = message.ts;
+      const dedupKey = `${botId}:${msgTs}`;
+      if (seenMessages.has(dedupKey)) return;
+      seenMessages.add(dedupKey);
+      if (seenMessages.size > 5000) {
+        const all = [...seenMessages];
+        seenMessages.clear();
+        for (const id of all.slice(-2500)) seenMessages.add(id);
+      }
 
       const userId = message.user;
       const text = message.text ?? "";
@@ -233,177 +256,178 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       return current;
 
       async function handleSlackMsg(): Promise<void> {
-      const threadTs = "thread_ts" in message ? message.thread_ts : undefined;
+        const threadTs = "thread_ts" in message ? message.thread_ts : undefined;
 
-      logger.info(`slack: bot "${botId}" received message in channel ${channelId} from user ${userId}`);
+        logger.info(`slack: bot "${botId}" received message in channel ${channelId} from user ${userId}`);
 
-      // Check if user is allowed (empty allowedUsers means allow everyone)
-      if (pluginConfig.allowedUsers.length > 0 && !pluginConfig.allowedUsers.includes(userId)) {
-        logger.debug(`slack: ignoring message from non-allowed user ${userId}`);
-        return;
-      }
-
-      // Resolve agent from bindings — try exact channel first, then fall back
-      // to bot-level binding (needed for Slack DMs where channel IDs are dynamic)
-      const agentId =
-        core.router.resolveAgent("slack", channelId) ??
-        core.router.resolveAgentByBot("slack", botId);
-      if (!agentId) {
-        logger.debug(`slack: no agent bound to channel ${channelId} or bot ${botId}`);
-        return;
-      }
-
-      // Check if message is a slash command (text-based, not actual Slack slash commands)
-      const trimmed = text.trim();
-      if (pluginConfig.commands.includes(trimmed)) {
-        const cmdResponse = await handleSlashCommand(trimmed, agentId, channelId, userId);
-        if (cmdResponse) {
-          await say({
-            text: cmdResponse,
-            thread_ts: threadTs ?? messageTs,
-          });
+        // Check if user is allowed (empty allowedUsers means allow everyone)
+        if (pluginConfig.allowedUsers.length > 0 && !pluginConfig.allowedUsers.includes(userId)) {
+          logger.debug(`slack: ignoring message from non-allowed user ${userId}`);
+          return;
         }
-        return;
-      }
 
-      // Post initial "Thinking..." message that we'll update with streaming content
-      const replyTs = threadTs ?? messageTs;
-      let initialMsg: { ts?: string } | undefined;
-      try {
-        initialMsg = await client.chat.postMessage({
-          channel: channelId,
-          text: "Thinking...",
-          thread_ts: replyTs,
-        }) as { ts?: string };
-      } catch {
-        // Fallback: use say() if postMessage fails
-        initialMsg = await say({ text: "Thinking...", thread_ts: replyTs }) as { ts?: string };
-      }
+        // Resolve agent from bindings — try exact channel first, then fall back
+        // to bot-level binding (needed for Slack DMs where channel IDs are dynamic)
+        const agentId =
+          core.router.resolveAgent("slack", channelId) ??
+          core.router.resolveAgentByBot("slack", botId);
+        if (!agentId) {
+          logger.debug(`slack: no agent bound to channel ${channelId} or bot ${botId}`);
+          return;
+        }
 
-      const sentTs = initialMsg?.ts;
-      let lastUpdateTime = 0;
-
-      // Throttled streaming callback — updates the message at most every UPDATE_THROTTLE_MS
-      const onChunk = (accumulated: string) => {
-        if (!sentTs) return;
-        const now = Date.now();
-        if (now - lastUpdateTime < UPDATE_THROTTLE_MS) return;
-        lastUpdateTime = now;
-
-        const mrkdwn = markdownToMrkdwn(accumulated);
-        const preview =
-          mrkdwn.length > SLACK_CHAR_LIMIT - 3
-            ? mrkdwn.slice(0, SLACK_CHAR_LIMIT - 3) + "..."
-            : mrkdwn;
-
-        client.chat.update({
-          channel: channelId,
-          ts: sentTs,
-          text: preview,
-          blocks: [
-            {
-              type: "section",
-              text: { type: "mrkdwn", text: preview },
-            },
-          ],
-        }).catch(() => {});
-      };
-
-      try {
-        // Extract file attachments (Slack files require bot token to download)
-        const attachments: IncomingMessage["attachments"] = [];
-        if ("files" in message && Array.isArray(message.files)) {
-          const bot = bots.find((b) => b.botId === botId);
-          const token = bot ? resolvedTokens.get(botId)?.token : undefined;
-
-          for (const file of message.files) {
-            const url = file.url_private_download ?? file.url_private;
-            if (!url) continue;
-
-            try {
-              const resp = await fetch(url, {
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-              });
-              if (!resp.ok) continue;
-
-              attachments.push({
-                type: file.mimetype ?? "application/octet-stream",
-                data: Buffer.from(await resp.arrayBuffer()),
-                filename: file.name ?? undefined,
-              });
-            } catch {
-              // Skip failed downloads
-            }
+        // Check if message is a slash command (text-based, not actual Slack slash commands)
+        const trimmed = text.trim();
+        if (pluginConfig.commands.includes(trimmed)) {
+          const cmdResponse = await handleSlashCommand(trimmed, agentId, channelId, userId);
+          if (cmdResponse) {
+            await say({
+              text: cmdResponse,
+              thread_ts: threadTs ?? messageTs,
+            });
           }
+          return;
         }
 
-        // Build IncomingMessage
-        const incoming: IncomingMessage = {
-          from: {
-            gateway: "slack",
+        // Post initial "Thinking..." message that we'll update with streaming content
+        const replyTs = threadTs ?? messageTs;
+        let initialMsg: { ts?: string } | undefined;
+        try {
+          initialMsg = await client.chat.postMessage({
             channel: channelId,
-            user: userId,
-            userId,
-            messageId: messageTs,
-          },
-          to: { agent: agentId },
-          content: text,
-          attachments,
+            text: "Thinking...",
+            thread_ts: replyTs,
+          }) as { ts?: string };
+        } catch {
+          // Fallback: use say() if postMessage fails
+          initialMsg = await say({ text: "Thinking...", thread_ts: replyTs }) as { ts?: string };
+        }
+
+        const sentTs = initialMsg?.ts;
+        let lastUpdateTime = 0;
+
+        // Throttled streaming callback — updates the message at most every UPDATE_THROTTLE_MS
+        const onChunk = (accumulated: string) => {
+          if (!sentTs) return;
+          const now = Date.now();
+          if (now - lastUpdateTime < UPDATE_THROTTLE_MS) return;
+          lastUpdateTime = now;
+
+          const mrkdwn = markdownToMrkdwn(accumulated);
+          // Cap at section limit for streaming preview
+          const preview =
+            mrkdwn.length > SECTION_TEXT_LIMIT - 3
+              ? mrkdwn.slice(0, SECTION_TEXT_LIMIT - 3) + "..."
+              : mrkdwn;
+
+          client.chat.update({
+            channel: channelId,
+            ts: sentTs,
+            text: preview,
+            blocks: [
+              {
+                type: "section",
+                text: { type: "mrkdwn", text: preview },
+              },
+            ],
+          }).catch(() => {});
         };
 
-        // Route the message with streaming callback
-        const response = await core.router.route(incoming, onChunk);
+        try {
+          // Extract file attachments (Slack files require bot token to download)
+          const attachments: IncomingMessage["attachments"] = [];
+          if ("files" in message && Array.isArray(message.files)) {
+            const bot = bots.find((b) => b.botId === botId);
+            const token = bot ? resolvedTokens.get(botId)?.token : undefined;
 
-        // Final update: replace initial message + send overflow chunks
-        const mrkdwn = markdownToMrkdwn(response);
-        const chunks = splitMessage(mrkdwn);
+            for (const file of message.files) {
+              const url = file.url_private_download ?? file.url_private;
+              if (!url) continue;
 
-        if (sentTs) {
-          await client.chat.update({
-            channel: channelId,
-            ts: sentTs,
-            text: chunks[0],
-            blocks: [
-              {
-                type: "section",
-                text: { type: "mrkdwn", text: chunks[0] },
-              },
-            ],
-          });
-        }
+              try {
+                const resp = await fetch(url, {
+                  headers: token ? { Authorization: `Bearer ${token}` } : {},
+                });
+                if (!resp.ok) continue;
 
-        // Send remaining chunks as new messages
-        for (let i = sentTs ? 1 : 0; i < chunks.length; i++) {
-          await say({
-            text: chunks[i],
-            blocks: [
-              {
-                type: "section",
-                text: { type: "mrkdwn", text: chunks[i] },
-              },
-            ],
-            thread_ts: replyTs,
-          });
-        }
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        logger.error(`slack: error handling message: ${errMsg}`);
+                attachments.push({
+                  type: file.mimetype ?? "application/octet-stream",
+                  data: Buffer.from(await resp.arrayBuffer()),
+                  filename: file.name ?? undefined,
+                });
+              } catch {
+                // Skip failed downloads
+              }
+            }
+          }
 
-        // Update initial message with error, or send new error message
-        if (sentTs) {
-          await client.chat.update({
-            channel: channelId,
-            ts: sentTs,
-            text: `:warning: Error: ${errMsg}`,
-          }).catch(() => {});
-        } else {
-          await say({
-            text: `:warning: Error: ${errMsg}`,
-            thread_ts: replyTs,
-          });
+          // Build IncomingMessage
+          const incoming: IncomingMessage = {
+            from: {
+              gateway: "slack",
+              channel: channelId,
+              user: userId,
+              userId,
+              messageId: messageTs,
+            },
+            to: { agent: agentId },
+            content: text,
+            attachments,
+          };
+
+          // Route the message with streaming callback
+          const response = await core.router.route(incoming, onChunk);
+
+          // Final update: replace initial message + send overflow chunks
+          const mrkdwn = markdownToMrkdwn(response);
+          const blocks = buildBlocks(mrkdwn);
+
+          if (sentTs) {
+            // First block goes into the edited message
+            await client.chat.update({
+              channel: channelId,
+              ts: sentTs,
+              text: blocks[0]?.text.text ?? response,
+              blocks: [blocks[0]],
+            });
+
+            // Remaining blocks as new messages
+            for (let i = 1; i < blocks.length; i++) {
+              await say({
+                text: blocks[i].text.text,
+                blocks: [blocks[i]],
+                thread_ts: replyTs,
+              });
+            }
+          } else {
+            // No initial message to edit — send all as new
+            for (const block of blocks) {
+              await say({
+                text: block.text.text,
+                blocks: [block],
+                thread_ts: replyTs,
+              });
+            }
+          }
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logger.error(`slack: error handling message: ${errMsg}`);
+
+          // Update initial message with error, or send new error message
+          if (sentTs) {
+            await client.chat.update({
+              channel: channelId,
+              ts: sentTs,
+              text: `:warning: Error: ${errMsg}`,
+            }).catch(() => {});
+          } else {
+            await say({
+              text: `:warning: Error: ${errMsg}`,
+              thread_ts: replyTs,
+            });
+          }
         }
       }
-      } // end handleSlackMsg
     });
   }
 

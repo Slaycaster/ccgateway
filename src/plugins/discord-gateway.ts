@@ -134,6 +134,11 @@ export default function createDiscordGateway(
   // Track recently seen message IDs to prevent processing the same message twice.
   const seenMessages = new Set<string>();
 
+  // Cross-agent loop prevention — tracks channels where the last message we
+  // processed was from a bot. If ANOTHER bot message arrives in the same channel
+  // before a human message resets it, we skip it (caps at 1 hop).
+  const botChainActive = new Set<string>();
+
   const plugin: CcgPlugin & Record<string, unknown> = {
     name: "discord-gateway",
     type: "gateway",
@@ -273,9 +278,33 @@ export default function createDiscordGateway(
       `discord-gateway: bot "${receivingBotId}" received message ${msg.id} in channel ${msg.channelId} from ${msg.author.tag} (bot=${msg.author.bot})`,
     );
 
-    // Ignore all bot messages (prevents feedback loops)
+    // Cross-agent communication: allow messages from our own bots, but
+    // prevent loops. External bots are always ignored.
     if (msg.author.bot) {
-      return;
+      // Ignore external bots entirely
+      if (!ownBotUserIds.has(msg.author.id)) return;
+
+      // Ignore self — a bot never responds to its own messages
+      const client = clients.get(receivingBotId);
+      if (client?.user?.id === msg.author.id) return;
+
+      // Loop prevention: only allow 1 hop of bot-to-bot per channel.
+      // If we already responded to a bot message here, skip until a human resets.
+      const chainKey = `${receivingBotId}:${msg.channelId}`;
+      if (botChainActive.has(chainKey)) {
+        logger.info(
+          `discord-gateway: bot "${receivingBotId}" skipping bot message in ${msg.channelId} (chain limit)`,
+        );
+        return;
+      }
+
+      // Mark chain active — next bot message in this channel will be skipped
+      botChainActive.add(chainKey);
+    } else {
+      // Human message resets the chain for all bots in this channel
+      for (const botId of clients.keys()) {
+        botChainActive.delete(`${botId}:${msg.channelId}`);
+      }
     }
 
     // Only handle messages if THIS bot is the one bound to this channel.
