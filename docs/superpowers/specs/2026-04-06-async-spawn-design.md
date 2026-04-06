@@ -43,8 +43,7 @@ A new method on `CCSpawner` that launches Claude Code in a detached tmux session
 tmux new-session -d -s <sessionName> -c <workspace> \
   "claude --dangerously-skip-permissions \
     --append-system-prompt-file <taskDir>/INSTRUCTIONS.md \
-    --model <model> \
-    -p '<message>' 2>&1 | tee <taskDir>/output.log"
+    --model <model> 2>&1 | tee <taskDir>/output.log"
 ```
 
 **Spawn command (screen fallback):**
@@ -52,13 +51,12 @@ tmux new-session -d -s <sessionName> -c <workspace> \
 screen -dmS <sessionName> bash -c \
   "cd <workspace> && claude --dangerously-skip-permissions \
     --append-system-prompt-file <taskDir>/INSTRUCTIONS.md \
-    --model <model> \
-    -p '<message>' 2>&1 | tee <taskDir>/output.log"
+    --model <model> 2>&1 | tee <taskDir>/output.log"
 ```
 
 **Session detection (screen fallback):** `screen -ls <sessionName>` — check if session appears in the list (exit code and output parsing).
 
-Uses `--print` mode (single-shot) so Claude Code processes the task and exits when done. The tmux session provides unlimited time and the ability to attach and watch live.
+Uses interactive mode (not `--print`) with `--dangerously-skip-permissions` so the human can attach to the tmux session to monitor progress and interact. The task is communicated via `INSTRUCTIONS.md` (system prompt). No inactivity timeout from ccgateway — the session runs until Claude Code exits or the human ends it.
 
 **Returns immediately** with `{ sessionName, taskDir }`.
 

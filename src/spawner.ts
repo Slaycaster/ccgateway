@@ -1,4 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +29,22 @@ export interface SpawnOptions {
   images?: ImageInput[];
 }
 
+export interface AsyncSpawnOptions {
+  workspace: string;
+  message: string;
+  systemPrompt: string;
+  model: string;
+  agentId: string;
+  ccgHome: string;
+}
+
+export interface AsyncSpawnResult {
+  sessionName: string;
+  taskDir: string;
+}
+
+export type TriageResult = "sync" | "async";
+
 /** Callback fired during streaming with the accumulated text so far. */
 export type StreamCallback = (accumulated: string) => void;
 
@@ -35,12 +54,185 @@ const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 const IMAGE_TIMEOUT_MS = 600_000; // 10 minutes — vision calls on Opus are slower
 
 /** Inactivity timeout: kill if no stdout data for this long. */
-const INACTIVITY_TIMEOUT_MS = 300_000; // 5 minutes of silence
+const INACTIVITY_TIMEOUT_MS = 900_000; // 15 minutes of silence
 
 /** Absolute safety cap so processes can't run forever. */
 const MAX_ABSOLUTE_TIMEOUT_MS = 1_800_000; // 30 minutes
 
 export class CCSpawner {
+  private _muxBinary: string | null | undefined = undefined; // undefined = not detected yet
+
+  // ── Triage ───────────────────────────────────────────────────────────────
+
+  /**
+   * Quick Sonnet call to classify a message as "sync" or "async".
+   * Defaults to "sync" on any failure (timeout, parse error, etc.).
+   */
+  async triage(message: string): Promise<TriageResult> {
+    const triagePrompt = [
+      "Classify this user message as either sync or async.",
+      "Reply with ONLY the word 'sync' or 'async', nothing else.",
+      "",
+      "sync = quick question, greeting, short answer, status check, clarification",
+      "async = intensive coding task, refactor, build feature, multi-file edit, debugging, long-running work",
+    ].join("\n");
+
+    try {
+      const result = await this.spawnText({
+        workspace: "/tmp",
+        message,
+        systemPrompt: triagePrompt,
+        model: "claude-haiku-4-5-20251001",
+        allowedTools: [],
+        timeoutMs: 15_000,
+      });
+
+      const answer = result.response.trim().toLowerCase();
+      if (answer === "async") return "async";
+      return "sync";
+    } catch {
+      return "sync";
+    }
+  }
+
+  // ── Async spawn (tmux interactive mode) ──────────────────────────────────
+
+  /**
+   * Launch Claude Code in interactive mode inside a detached tmux session.
+   *
+   * - No `--print` flag — runs the full interactive REPL
+   * - `--dangerously-skip-permissions` so it won't block on tool approvals
+   * - System prompt injected via `--append-system-prompt-file`
+   * - User's message sent via `tmux send-keys` after a short init delay
+   * - Returns immediately with the session name and task directory
+   */
+  async spawnAsync(options: AsyncSpawnOptions): Promise<AsyncSpawnResult> {
+    const mux = await this.detectMux();
+    if (!mux) {
+      throw new Error("Neither tmux nor screen is available. Install tmux to use async spawn.");
+    }
+
+    const { workspace, message, systemPrompt, model, agentId, ccgHome } = options;
+
+    // Session naming: ccg-<agentId>-<shortId>
+    const shortId = randomBytes(2).toString("hex");
+    const sessionName = `ccg-${agentId}-${shortId}`;
+
+    // Task directory
+    const taskDir = join(ccgHome, "async-tasks", sessionName);
+    await mkdir(taskDir, { recursive: true });
+
+    // Write system prompt as INSTRUCTIONS.md
+    await writeFile(join(taskDir, "INSTRUCTIONS.md"), systemPrompt, "utf-8");
+
+    // Write the user's message to PROMPT.txt for send-keys
+    const promptFile = join(taskDir, "PROMPT.txt");
+    await writeFile(promptFile, message, "utf-8");
+
+    const outputLog = join(taskDir, "output.log");
+    const instructionsFile = join(taskDir, "INSTRUCTIONS.md");
+
+    if (mux === "tmux") {
+      // Launch tmux session with claude in interactive mode
+      const tmuxCmd = [
+        `claude --dangerously-skip-permissions`,
+        `--append-system-prompt-file ${instructionsFile}`,
+        `--model ${model}`,
+        `2>&1 | tee ${outputLog}`,
+      ].join(" ");
+
+      await execAsync("tmux", [
+        "new-session", "-d",
+        "-s", sessionName,
+        "-c", workspace,
+        tmuxCmd,
+      ]);
+
+      // Wait for claude to initialize, then send the prompt + Enter
+      await sleep(3000);
+
+      // Use tmux load-buffer + paste-buffer for reliable long message delivery
+      await execAsync("tmux", ["load-buffer", "-b", "ccg-prompt", promptFile]);
+      await execAsync("tmux", ["paste-buffer", "-b", "ccg-prompt", "-d", "-t", sessionName]);
+      await execAsync("tmux", ["send-keys", "-t", sessionName, "Enter"]);
+    } else {
+      // screen fallback
+      const screenCmd = [
+        `cd ${workspace} &&`,
+        `claude --dangerously-skip-permissions`,
+        `--append-system-prompt-file ${instructionsFile}`,
+        `--model ${model}`,
+        `2>&1 | tee ${outputLog}`,
+      ].join(" ");
+
+      await execAsync("screen", [
+        "-dmS", sessionName,
+        "bash", "-c", screenCmd,
+      ]);
+
+      // Wait for claude to initialize, then stuff the prompt
+      await sleep(3000);
+
+      // screen uses -X stuff to send text
+      await execAsync("screen", [
+        "-S", sessionName,
+        "-X", "stuff",
+        message + "\n",
+      ]);
+    }
+
+    return { sessionName, taskDir };
+  }
+
+  /**
+   * Detect available terminal multiplexer. Cached after first call.
+   * Returns "tmux", "screen", or null.
+   */
+  async detectMux(): Promise<string | null> {
+    if (this._muxBinary !== undefined) return this._muxBinary;
+
+    try {
+      await execAsync("which", ["tmux"]);
+      this._muxBinary = "tmux";
+      return "tmux";
+    } catch {
+      // tmux not found, try screen
+    }
+
+    try {
+      await execAsync("which", ["screen"]);
+      this._muxBinary = "screen";
+      return "screen";
+    } catch {
+      // screen not found either
+    }
+
+    this._muxBinary = null;
+    return null;
+  }
+
+  /**
+   * Check if a tmux/screen session is still alive.
+   */
+  async isSessionAlive(sessionName: string): Promise<boolean> {
+    const mux = await this.detectMux();
+    if (!mux) return false;
+
+    try {
+      if (mux === "tmux") {
+        await execAsync("tmux", ["has-session", "-t", sessionName]);
+        return true;
+      } else {
+        const { stdout } = await execAsyncOutput("screen", ["-ls", sessionName]);
+        return stdout.includes(sessionName);
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  // ── Batch spawn ──────────────────────────────────────────────────────────
+
   /**
    * Spawn a `claude --print` invocation (batch mode — collects full output).
    *
@@ -434,6 +626,32 @@ export class CCSpawner {
       });
     });
   }
+}
+
+// ── Utility functions ─────────────────────────────────────────────────────
+
+/** Promise wrapper around execFile. */
+function execAsync(cmd: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+/** Promise wrapper around execFile that returns stdout. */
+function execAsyncOutput(cmd: string, args: string[]): Promise<{ stdout: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, (error, stdout) => {
+      if (error) reject(error);
+      else resolve({ stdout });
+    });
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Stream-json output parser ─────────────────────────────────────────────

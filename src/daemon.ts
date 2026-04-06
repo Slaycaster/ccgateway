@@ -5,6 +5,7 @@ import { SkillManager } from './skills.js';
 import { ContextBuilder } from './context.js';
 import { CCSpawner } from './spawner.js';
 import { MessageRouter } from './router.js';
+import { AsyncTaskWatcher } from './async-watcher.js';
 import { PluginLoader } from './plugin.js';
 import type { CcgCore, CcgPlugin } from './plugin.js';
 import { CrossAgentMessenger } from './messaging.js';
@@ -71,6 +72,21 @@ export async function startDaemon(): Promise<void> {
   );
   messenger.setRouter(router);
 
+  // 5.7 Create async task watcher
+  const watcher = new AsyncTaskWatcher(
+    spawner,
+    sessions,
+    (gateway: string) => {
+      // Resolve sendToChannel from the loaded plugin for this gateway
+      const plugin = loader.getPlugin(`${gateway}-gateway`) as any;
+      if (plugin && typeof plugin.sendToChannel === 'function') {
+        return plugin.sendToChannel;
+      }
+      return null;
+    },
+  );
+  router.setWatcher(watcher);
+
   // 6. Build CcgCore object for plugins
   const core: CcgCore = {
     config,
@@ -104,6 +120,9 @@ export async function startDaemon(): Promise<void> {
   // 8. Start all plugins
   await loader.startAll();
 
+  // 8.1 Start async task watcher
+  watcher.start();
+
   // 8.5 Start IPC server for cross-agent messaging from CLI
   const ipcServer = createIpcServer(async (toAgent, content, fromAgent) => {
     await messenger.send(toAgent, content, fromAgent);
@@ -116,6 +135,9 @@ export async function startDaemon(): Promise<void> {
   // 11. Set up signal handlers for graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`ccgateway received ${signal}, shutting down...`);
+    try {
+      watcher.stop();
+    } catch { /* non-fatal */ }
     try {
       ipcServer.close();
       removeSocketFile();

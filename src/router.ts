@@ -2,10 +2,13 @@ import type { AgentRegistry } from "./agents.js";
 import type { SessionManager } from "./sessions.js";
 import type { ContextBuilder } from "./context.js";
 import type { CCSpawner, ImageInput, StreamCallback } from "./spawner.js";
+import type { AsyncTaskWatcher } from "./async-watcher.js";
 import type { IncomingMessage, Attachment, BindingConfig } from "./types.js";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { getCcgHome } from "./config.js";
+import { logger } from "./logger.js";
 
 // ── Trivial message short-circuit ─────────────────────────────────────────
 
@@ -27,6 +30,8 @@ function pickTrivialReply(): string {
 // ── MessageRouter ─────────────────────────────────────────────────────────
 
 export class MessageRouter {
+  private watcher: AsyncTaskWatcher | null = null;
+
   constructor(
     private agents: AgentRegistry,
     private sessions: SessionManager,
@@ -34,6 +39,13 @@ export class MessageRouter {
     private spawner: CCSpawner,
     private bindings: BindingConfig[],
   ) {}
+
+  /**
+   * Set the async task watcher (called after watcher is created in daemon).
+   */
+  setWatcher(watcher: AsyncTaskWatcher): void {
+    this.watcher = watcher;
+  }
 
   /**
    * Resolve which agent handles a message based on bindings.
@@ -156,7 +168,58 @@ export class MessageRouter {
     // 6. Build context
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
-    // 7. Spawn claude
+    // 7. Triage: sync or async?
+    if (this.watcher) {
+      const triageResult = await this.spawner.triage(messageContent);
+
+      if (triageResult === "async") {
+        logger.info(`router: async triage for agent=${agentId}, dispatching to tmux`);
+
+        const asyncResult = await this.spawner.spawnAsync({
+          workspace: agent.workspace,
+          message: messageContent,
+          systemPrompt,
+          model: agent.model,
+          agentId,
+          ccgHome: getCcgHome(),
+        });
+
+        // Find the bot ID from the binding for this agent + gateway
+        const binding = this.bindings.find(
+          (b) => b.agent === agentId && b.gateway === message.from.gateway,
+        );
+        const botId = binding?.bot ?? agentId;
+
+        // Register with watcher
+        this.watcher.register({
+          sessionName: asyncResult.sessionName,
+          taskDir: asyncResult.taskDir,
+          agentId,
+          gateway: message.from.gateway,
+          channel: message.from.channel,
+          botId,
+          startedAt: Date.now(),
+        });
+
+        // Append placeholder to session and return immediately
+        const placeholder = `[async] Task dispatched to tmux session \`${asyncResult.sessionName}\`. I'll post the result here when done.`;
+        await this.sessions.appendMessage(agentId, sessionKey, {
+          role: "assistant",
+          content: placeholder,
+          ts: Date.now(),
+          tokens: { in: 0, out: 0 },
+        });
+
+        // Clean up attachment temp dir
+        if (attachmentDir) {
+          rm(attachmentDir, { recursive: true, force: true }).catch(() => {});
+        }
+
+        return placeholder;
+      }
+    }
+
+    // 8. Spawn claude (sync path)
     const spawnOptions = {
       workspace: agent.workspace,
       message: messageContent,
@@ -171,17 +234,17 @@ export class MessageRouter {
       ? await this.spawner.spawnStreaming(spawnOptions, onChunk)
       : await this.spawner.spawn(spawnOptions);
 
-    // 8. Clean up attachment temp dir
+    // 9. Clean up attachment temp dir
     if (attachmentDir) {
       rm(attachmentDir, { recursive: true, force: true }).catch(() => {});
     }
 
-    // 9. Handle failure: append error to session and throw
+    // 10. Handle failure: append error to session and throw
     if (result.exitCode !== 0) {
       const isTimeout = result.exitCode === 124;
       const stderrHint = result.stderr ? `\n\nDetails: ${result.stderr.slice(0, 500)}` : "";
       const errorContent = isTimeout
-        ? "The task timed out — no activity was detected for over 5 minutes. Try breaking it into smaller steps."
+        ? "The task timed out — no activity was detected for over 15 minutes. Try breaking it into smaller steps."
         : (result.response || `Spawner failed with exit code ${result.exitCode}`) + stderrHint;
       await this.sessions.appendMessage(agentId, sessionKey, {
         role: "assistant",
@@ -192,7 +255,7 @@ export class MessageRouter {
       throw new Error(errorContent);
     }
 
-    // 10. Append assistant response to session
+    // 11. Append assistant response to session
     await this.sessions.appendMessage(agentId, sessionKey, {
       role: "assistant",
       content: result.response,
@@ -200,7 +263,7 @@ export class MessageRouter {
       tokens: result.tokensEstimate,
     });
 
-    // 11. Return response text (guard against empty responses)
+    // 12. Return response text (guard against empty responses)
     return result.response.trim() || "(no response)";
   }
 
