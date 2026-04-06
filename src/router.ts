@@ -181,7 +181,7 @@ export class MessageRouter {
       const isTimeout = result.exitCode === 124;
       const stderrHint = result.stderr ? `\n\nDetails: ${result.stderr.slice(0, 500)}` : "";
       const errorContent = isTimeout
-        ? "The task timed out — no activity was detected for over 2 minutes. Try breaking it into smaller steps."
+        ? "The task timed out — no activity was detected for over 5 minutes. Try breaking it into smaller steps."
         : (result.response || `Spawner failed with exit code ${result.exitCode}`) + stderrHint;
       await this.sessions.appendMessage(agentId, sessionKey, {
         role: "assistant",

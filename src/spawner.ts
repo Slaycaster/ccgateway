@@ -35,7 +35,7 @@ const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 const IMAGE_TIMEOUT_MS = 600_000; // 10 minutes — vision calls on Opus are slower
 
 /** Inactivity timeout: kill if no stdout data for this long. */
-const INACTIVITY_TIMEOUT_MS = 120_000; // 2 minutes of silence
+const INACTIVITY_TIMEOUT_MS = 300_000; // 5 minutes of silence
 
 /** Absolute safety cap so processes can't run forever. */
 const MAX_ABSOLUTE_TIMEOUT_MS = 1_800_000; // 30 minutes
