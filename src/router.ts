@@ -110,8 +110,12 @@ export class MessageRouter {
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
     // 5.5 Triage: should this run async?
+    //     Images always go async — they're slow on Opus and the user gets
+    //     instant feedback instead of waiting 10+ minutes.
     const mode = this.watcher
-      ? await this.spawner.triage(messageContent, agent.model)
+      ? images.length > 0
+        ? ("async" as const)
+        : await this.spawner.triage(messageContent, agent.model)
       : ("sync" as const);
 
     if (mode === "async") {
