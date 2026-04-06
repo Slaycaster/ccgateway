@@ -136,7 +136,12 @@ export class SkillManager {
   }
 
   /**
-   * Build skill index for context injection (name + description per skill).
+   * Build skill index for context injection.
+   *
+   * Includes full skill content inline so the agent has the actual
+   * instructions — not just names. Without this, the agent sees skills
+   * listed but can't act on them (Claude Code's Skill tool doesn't know
+   * about ccgateway's custom skills).
    */
   async buildSkillIndex(agentId?: string): Promise<string> {
     const skills = await this.discoverSkills(agentId);
@@ -145,12 +150,22 @@ export class SkillManager {
       return "--- Available Skills ---\n(none)";
     }
 
-    const lines = skills.map((s) => {
-      const tag = s.type === "native" ? " [native]" : "";
-      return `- ${s.name}: ${s.description}${tag}`;
-    });
+    const sections: string[] = [];
 
-    return `--- Available Skills ---\n${lines.join("\n")}`;
+    for (const skill of skills) {
+      const content = await this.readSkill(skill.name, agentId);
+      if (content) {
+        // Strip frontmatter from content — agent doesn't need YAML metadata
+        const body = content.replace(/^---[\s\S]*?---\s*/, "").trim();
+        sections.push(`=== Skill: ${skill.name} ===\n${skill.description}\n\n${body}`);
+      } else {
+        // Fallback: just name + description if file can't be read
+        const tag = skill.type === "native" ? " [native]" : "";
+        sections.push(`=== Skill: ${skill.name} ===\n${skill.description}${tag}`);
+      }
+    }
+
+    return `--- Available Skills ---\n\n${sections.join("\n\n")}`;
   }
 
   /**

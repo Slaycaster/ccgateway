@@ -1,7 +1,4 @@
-import { spawn, execSync } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -17,20 +14,6 @@ export interface ImageInput {
   mediaType: string;
 }
 
-export interface AsyncSpawnOptions {
-  workspace: string;
-  message: string;
-  systemPrompt: string;
-  model: string;
-  ccgHome: string;
-  agentId: string;
-}
-
-export interface AsyncSpawnResult {
-  sessionName: string;
-  taskDir: string;
-}
-
 export interface SpawnOptions {
   workspace: string;
   message: string;
@@ -43,138 +26,216 @@ export interface SpawnOptions {
   images?: ImageInput[];
 }
 
+/** Callback fired during streaming with the accumulated text so far. */
+export type StreamCallback = (accumulated: string) => void;
+
 // ── CCSpawner ──────────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 const IMAGE_TIMEOUT_MS = 600_000; // 10 minutes — vision calls on Opus are slower
 
+/** Inactivity timeout: kill if no stdout data for this long. */
+const INACTIVITY_TIMEOUT_MS = 120_000; // 2 minutes of silence
+
+/** Absolute safety cap so processes can't run forever. */
+const MAX_ABSOLUTE_TIMEOUT_MS = 1_800_000; // 30 minutes
+
 export class CCSpawner {
-  private static readonly TRIAGE_TIMEOUT_MS = 15_000;
-  private static readonly TRIAGE_PROMPT = `Given this user request, will it require intensive coding work (multiple file edits, building features, refactoring, debugging across files) or is it a quick task (answering questions, small edits, short explanations)?
-
-Respond with ONLY the single word "async" or "sync". Nothing else.
-
-User request:`;
-
   /**
-   * Run a quick `claude --print` with Sonnet to classify a message as
-   * "sync" (quick task) or "async" (intensive, long-running).
+   * Spawn a `claude --print` invocation (batch mode — collects full output).
    *
-   * Defaults to "sync" on timeout, unexpected output, or errors.
-   */
-  async triage(message: string, _model: string): Promise<"sync" | "async"> {
-    const triageModel = "sonnet";
-    const args = [
-      "--print",
-      "--dangerously-skip-permissions",
-      "-p",
-      `${CCSpawner.TRIAGE_PROMPT} ${message}`,
-      "--model",
-      triageModel,
-      "--bare",
-    ];
-
-    return new Promise<"sync" | "async">((resolve) => {
-      const child = spawn("claude", args, {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      let stdout = "";
-      let timedOut = false;
-
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString();
-      });
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-      }, CCSpawner.TRIAGE_TIMEOUT_MS);
-
-      child.on("close", () => {
-        clearTimeout(timer);
-        if (timedOut) {
-          resolve("sync");
-          return;
-        }
-        const trimmed = stdout.trim().toLowerCase();
-        resolve(trimmed === "async" ? "async" : "sync");
-      });
-
-      child.on("error", () => {
-        clearTimeout(timer);
-        resolve("sync");
-      });
-    });
-  }
-
-  /**
-   * Spawn a `claude --print` invocation.
-   *
-   * When `images` are provided, uses `--input-format stream-json` to pass
-   * image content blocks directly via stdin (avoids the Read-tool
-   * round-trip).  Otherwise falls back to the simpler `-p "<message>"` form
-   * with stdin closed.
+   * Used by CLI chat. For gateway streaming, use `spawnStreaming()` instead.
    */
   async spawn(options: SpawnOptions): Promise<SpawnResult> {
     const hasImages = options.images && options.images.length > 0;
     return hasImages ? this.spawnStreamJson(options) : this.spawnText(options);
   }
 
-  // ── Multiplexer detection ────────────────────────────────────────────
+  /**
+   * Spawn claude with `--output-format stream-json --include-partial-messages`
+   * and relay incremental text to the caller via `onChunk`.
+   *
+   * Uses an **activity-based timeout**: the process is killed only after
+   * `INACTIVITY_TIMEOUT_MS` of silence (no stdout data), not after an
+   * absolute duration. A safety cap of `MAX_ABSOLUTE_TIMEOUT_MS` prevents
+   * runaway processes.
+   */
+  async spawnStreaming(
+    options: SpawnOptions,
+    onChunk?: StreamCallback,
+  ): Promise<SpawnResult> {
+    const {
+      workspace,
+      message,
+      systemPrompt,
+      model,
+      images = [],
+    } = options;
 
-  private detectMultiplexer(): "tmux" | "screen" {
-    try {
-      execSync("which tmux", { stdio: "pipe" });
-      return "tmux";
-    } catch {
-      // tmux not found, try screen
-    }
-    try {
-      execSync("which screen", { stdio: "pipe" });
-      return "screen";
-    } catch {
-      // screen not found either
-    }
-    throw new Error(
-      "Neither tmux nor screen is installed. Install one to use async tasks.",
-    );
-  }
+    const hasImages = images.length > 0;
 
-  // ── Async spawn (background task via tmux/screen) ───────────────────
+    const args = [
+      "--print",
+      "--dangerously-skip-permissions",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      systemPrompt,
+      "--model",
+      model,
+    ];
 
-  async spawnAsync(options: AsyncSpawnOptions): Promise<AsyncSpawnResult> {
-    const { workspace, message, systemPrompt, model, ccgHome, agentId } = options;
-    const mux = this.detectMultiplexer();
-
-    const shortId = randomBytes(2).toString("hex");
-    const sessionName = `ccg-${agentId}-${shortId}`;
-    const taskDir = join(ccgHome, "async-tasks", sessionName);
-
-    mkdirSync(taskDir, { recursive: true });
-
-    // Write system prompt + result instruction
-    const instructions = `${systemPrompt}\n\nWhen you are completely finished with the task, write a concise summary of what you did to: ${join(taskDir, "RESULT.md")}`;
-    writeFileSync(join(taskDir, "INSTRUCTIONS.md"), instructions, "utf-8");
-
-    const outputLog = join(taskDir, "output.log");
-    const instructionsFile = join(taskDir, "INSTRUCTIONS.md");
-
-    // Escape single quotes in message for shell
-    const escapedMessage = message.replace(/'/g, "'\\''");
-
-    if (mux === "tmux") {
-      const cmd = `tmux new-session -d -s ${sessionName} -c '${workspace}' "claude --dangerously-skip-permissions --append-system-prompt-file '${instructionsFile}' --model ${model} -p '${escapedMessage}' 2>&1 | tee '${outputLog}'"`;
-      execSync(cmd, { stdio: "pipe" });
+    if (hasImages) {
+      args.push("--input-format", "stream-json");
     } else {
-      const cmd = `screen -dmS ${sessionName} bash -c "cd '${workspace}' && claude --dangerously-skip-permissions --append-system-prompt-file '${instructionsFile}' --model ${model} -p '${escapedMessage}' 2>&1 | tee '${outputLog}'"`;
-      execSync(cmd, { stdio: "pipe" });
+      args.push("-p", message);
     }
 
-    return { sessionName, taskDir };
+    return new Promise<SpawnResult>((resolve) => {
+      const child = spawn("claude", args, {
+        cwd: workspace,
+        stdio: [hasImages ? "pipe" : "ignore", "pipe", "pipe"],
+      });
+
+      let accumulated = "";
+      let stderr = "";
+      let lastActivity = Date.now();
+      let timedOut = false;
+      let lineBuffer = "";
+      let finalResult = "";
+
+      // If images, send content via stdin
+      if (hasImages && child.stdin) {
+        const content: Array<
+          | { type: "text"; text: string }
+          | {
+              type: "image";
+              source: { type: "base64"; media_type: string; data: string };
+            }
+        > = [];
+
+        for (const img of images) {
+          content.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: img.mediaType,
+              data: img.base64,
+            },
+          });
+        }
+        content.push({ type: "text", text: message });
+
+        const stdinPayload =
+          JSON.stringify({
+            type: "user",
+            message: { role: "user", content },
+          }) + "\n";
+
+        child.stdin.write(stdinPayload);
+        child.stdin.end();
+      }
+
+      child.stdout!.on("data", (chunk: Buffer) => {
+        lastActivity = Date.now();
+        lineBuffer += chunk.toString();
+
+        // Parse complete JSONL lines
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop()!; // keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+
+            // Partial text delta — relay to caller
+            if (
+              event.type === "stream_event" &&
+              event.event?.type === "content_block_delta" &&
+              event.event?.delta?.type === "text_delta"
+            ) {
+              accumulated += event.event.delta.text;
+              onChunk?.(accumulated);
+            }
+
+            // Final result event
+            if (event.type === "result" && typeof event.result === "string") {
+              finalResult = event.result;
+            }
+          } catch {
+            // skip non-JSON lines
+          }
+        }
+      });
+
+      child.stderr!.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      // Activity-based timeout: kill only on silence
+      const activityCheck = setInterval(() => {
+        if (Date.now() - lastActivity > INACTIVITY_TIMEOUT_MS) {
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (!child.killed) child.kill("SIGKILL");
+          }, 5000);
+          clearInterval(activityCheck);
+        }
+      }, 10_000);
+
+      // Absolute safety cap
+      const absoluteTimer = setTimeout(() => {
+        if (!child.killed) {
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (!child.killed) child.kill("SIGKILL");
+          }, 5000);
+        }
+      }, MAX_ABSOLUTE_TIMEOUT_MS);
+
+      child.on("close", (code) => {
+        clearInterval(activityCheck);
+        clearTimeout(absoluteTimer);
+
+        const exitCode = timedOut ? 124 : (code ?? 1);
+        const response = finalResult || accumulated || "";
+        const inputChars = message.length + systemPrompt.length;
+        const outputChars = response.length;
+
+        resolve({
+          response,
+          stderr,
+          exitCode,
+          tokensEstimate: {
+            in: Math.ceil(inputChars / 4),
+            out: Math.ceil(outputChars / 4),
+          },
+        });
+      });
+
+      child.on("error", (err) => {
+        clearInterval(activityCheck);
+        clearTimeout(absoluteTimer);
+
+        resolve({
+          response: "",
+          stderr: err.message,
+          exitCode: 1,
+          tokensEstimate: {
+            in: Math.ceil((message.length + systemPrompt.length) / 4),
+            out: 0,
+          },
+        });
+      });
+    });
   }
 
-  // ── Text-only path ────────────────────────────────────────────────────
+  // ── Text-only path (batch — used by CLI chat via spawn()) ───────────────
 
   private spawnText(options: SpawnOptions): Promise<SpawnResult> {
     const {
@@ -256,7 +317,7 @@ User request:`;
     });
   }
 
-  // ── Image-aware path (stream-json) ────────────────────────────────────
+  // ── Image-aware path (stream-json, batch — used by CLI chat via spawn()) ─
 
   private spawnStreamJson(options: SpawnOptions): Promise<SpawnResult> {
     const {

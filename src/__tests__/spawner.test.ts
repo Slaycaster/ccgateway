@@ -6,22 +6,11 @@ import { EventEmitter } from "node:events";
 
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
-  execSync: vi.fn(),
 }));
 
-vi.mock("node:fs", () => ({
-  writeFileSync: vi.fn(),
-  mkdirSync: vi.fn(),
-}));
-
-vi.mock("node:crypto", () => ({
-  randomBytes: vi.fn(() => Buffer.from([0xa3, 0xf2])),
-}));
-
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 const mockedSpawn = vi.mocked(spawn);
-const mockedExecSync = vi.mocked(execSync);
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -483,70 +472,152 @@ describe("spawn — image support (stream-json mode)", () => {
   });
 });
 
-// ── Tests — triage — sync vs async classification ────────────────────────
+// ── Tests — spawnStreaming ──────────────────────────────────────────────────
 
-describe("triage — sync vs async classification", () => {
-  it('returns "sync" for simple questions', async () => {
-    mockSpawnResult("sync");
+describe("spawnStreaming — streaming output", () => {
+  it("constructs correct streaming command arguments", async () => {
+    // Build stream-json output with partial messages
+    const streamOutput = [
+      '{"type":"system","subtype":"init","session_id":"s1"}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}}',
+      '{"type":"result","subtype":"success","result":"Hello world"}',
+      '',
+    ].join("\n");
 
-    const promise = spawner.triage("What is a closure?", "sonnet");
+    mockSpawnResult(streamOutput);
+
+    const promise = spawner.spawnStreaming({
+      workspace: "/workspace",
+      message: "Say hello",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+    });
 
     await vi.runAllTimersAsync();
-    const result = await promise;
+    await promise;
 
-    expect(result).toBe("sync");
+    const [cmd, args] = mockedSpawn.mock.calls[0];
+    expect(cmd).toBe("claude");
+    expect(args).toContain("--output-format");
+    expect(args).toContain("stream-json");
+    expect(args).toContain("--verbose");
+    expect(args).toContain("--include-partial-messages");
+    expect(args).toContain("-p");
+    expect(args).toContain("Say hello");
   });
 
-  it('returns "async" for intensive tasks', async () => {
-    mockSpawnResult("async");
-
-    const promise = spawner.triage(
-      "Refactor the entire auth module to use OAuth2",
-      "sonnet",
-    );
-
-    await vi.runAllTimersAsync();
-    const result = await promise;
-
-    expect(result).toBe("async");
-  });
-
-  it('defaults to "sync" on timeout', async () => {
+  it("calls onChunk with accumulated text from stream deltas", async () => {
     const child = createMockChild();
     mockedSpawn.mockReturnValue(child as any);
 
-    const promise = spawner.triage("Some task", "sonnet");
+    const onChunk = vi.fn();
 
-    // Advance past the 15s triage timeout
-    await vi.advanceTimersByTimeAsync(15_000);
-
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-
-    // Process exits after being killed
-    child.emit("close", null);
-
-    const result = await promise;
-    expect(result).toBe("sync");
-  });
-
-  it('defaults to "sync" on unexpected output', async () => {
-    mockSpawnResult(
-      "Well, I think this task is something that could be done quickly but also might take a while...",
+    const promise = spawner.spawnStreaming(
+      {
+        workspace: "/workspace",
+        message: "Say hello",
+        systemPrompt: "ctx",
+        model: "sonnet",
+        allowedTools: [],
+      },
+      onChunk,
     );
 
-    const promise = spawner.triage("Do something", "sonnet");
+    // Emit partial messages line by line
+    process.nextTick(() => {
+      child.stdout.emit("data", Buffer.from(
+        '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}\n',
+      ));
+      child.stdout.emit("data", Buffer.from(
+        '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}}\n',
+      ));
+      child.stdout.emit("data", Buffer.from(
+        '{"type":"result","subtype":"success","result":"Hello world"}\n',
+      ));
+      child.emit("close", 0);
+    });
 
     await vi.runAllTimersAsync();
     const result = await promise;
 
-    expect(result).toBe("sync");
+    expect(onChunk).toHaveBeenCalledWith("Hello");
+    expect(onChunk).toHaveBeenCalledWith("Hello world");
+    expect(result.response).toBe("Hello world");
+    expect(result.exitCode).toBe(0);
   });
 
-  it('defaults to "sync" on spawn error', async () => {
+  it("returns accumulated text when no result event is present", async () => {
     const child = createMockChild();
     mockedSpawn.mockReturnValue(child as any);
 
-    const promise = spawner.triage("Some task", "sonnet");
+    const promise = spawner.spawnStreaming({
+      workspace: "/workspace",
+      message: "Say hello",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+    });
+
+    process.nextTick(() => {
+      child.stdout.emit("data", Buffer.from(
+        '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Just accumulated"}}}\n',
+      ));
+      child.emit("close", 0);
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result.response).toBe("Just accumulated");
+  });
+
+  it("handles images in streaming mode", async () => {
+    const child = createMockChild({ withStdin: true });
+    mockedSpawn.mockReturnValue(child as any);
+
+    const promise = spawner.spawnStreaming({
+      workspace: "/workspace",
+      message: "Describe",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+      images: [{ base64: "abc123", mediaType: "image/png" }],
+    });
+
+    process.nextTick(() => {
+      child.stdout.emit("data", Buffer.from(
+        '{"type":"result","subtype":"success","result":"A picture"}\n',
+      ));
+      child.emit("close", 0);
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    // Should have used stdin for images
+    expect(child.stdin.write).toHaveBeenCalledTimes(1);
+    expect(child.stdin.end).toHaveBeenCalledTimes(1);
+
+    // Should have --input-format stream-json
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).toContain("--input-format");
+
+    expect(result.response).toBe("A picture");
+  });
+
+  it("handles spawn error in streaming mode", async () => {
+    const child = createMockChild();
+    mockedSpawn.mockReturnValue(child as any);
+
+    const promise = spawner.spawnStreaming({
+      workspace: "/workspace",
+      message: "Hello",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+    });
 
     process.nextTick(() => {
       child.emit("error", new Error("ENOENT: claude not found"));
@@ -555,18 +626,8 @@ describe("triage — sync vs async classification", () => {
     await vi.runAllTimersAsync();
     const result = await promise;
 
-    expect(result).toBe("sync");
-  });
-
-  it("trims and lowercases response before matching", async () => {
-    mockSpawnResult("  Async  \n");
-
-    const promise = spawner.triage("Build a full REST API", "sonnet");
-
-    await vi.runAllTimersAsync();
-    const result = await promise;
-
-    expect(result).toBe("async");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("ENOENT: claude not found");
   });
 });
 
@@ -615,100 +676,5 @@ describe("parseStreamOutput", () => {
 
   it("handles empty output", () => {
     expect(parseStreamOutput("")).toBe("");
-  });
-});
-
-// ── Tests — detectMultiplexer ────────────────────────────────────────────
-
-describe("detectMultiplexer", () => {
-  it("returns 'tmux' when tmux is available", () => {
-    mockedExecSync.mockReturnValueOnce("/usr/bin/tmux" as any);
-    expect((spawner as any).detectMultiplexer()).toBe("tmux");
-  });
-
-  it("returns 'screen' when tmux is not available but screen is", () => {
-    mockedExecSync
-      .mockImplementationOnce(() => { throw new Error("not found"); })
-      .mockReturnValueOnce("/usr/bin/screen" as any);
-    expect((spawner as any).detectMultiplexer()).toBe("screen");
-  });
-
-  it("throws when neither is available", () => {
-    mockedExecSync.mockImplementation(() => { throw new Error("not found"); });
-    expect(() => (spawner as any).detectMultiplexer()).toThrow(
-      "Neither tmux nor screen is installed",
-    );
-  });
-});
-
-// ── Tests — spawnAsync ───────────────────────────────────────────────────
-
-describe("spawnAsync", () => {
-  beforeEach(() => {
-    // Default: tmux available, then allow all other execSync calls
-    mockedExecSync.mockReturnValue("" as any);
-  });
-
-  it("returns sessionName and taskDir immediately", async () => {
-    // First call: which tmux (detectMultiplexer)
-    // Second call: tmux new-session
-    mockedExecSync.mockReturnValue("/usr/bin/tmux" as any);
-
-    const result = await spawner.spawnAsync({
-      workspace: "/home/user/project",
-      message: "Refactor the auth module",
-      systemPrompt: "You are an assistant",
-      model: "opus",
-      ccgHome: "/home/user/.ccgateway",
-      agentId: "salt",
-    });
-
-    expect(result.sessionName).toMatch(/^ccg-salt-[a-f0-9]{4}$/);
-    expect(result.taskDir).toContain("async-tasks");
-    expect(result.taskDir).toContain(result.sessionName);
-  });
-
-  it("spawns tmux new-session with correct arguments", async () => {
-    mockedExecSync.mockReturnValue("" as any);
-
-    await spawner.spawnAsync({
-      workspace: "/home/user/project",
-      message: "Build feature X",
-      systemPrompt: "You are helpful",
-      model: "opus",
-      ccgHome: "/tmp/test-ccg",
-      agentId: "salt",
-    });
-
-    const tmuxCalls = mockedExecSync.mock.calls.filter(
-      (c) => String(c[0]).includes("tmux new-session"),
-    );
-    expect(tmuxCalls.length).toBe(1);
-    const cmd = String(tmuxCalls[0][0]);
-    expect(cmd).toContain("--dangerously-skip-permissions");
-    expect(cmd).toContain("--model opus");
-    expect(cmd).toContain("Build feature X");
-  });
-
-  it("uses screen fallback when tmux is unavailable", async () => {
-    mockedExecSync
-      .mockImplementationOnce(() => { throw new Error("not found"); }) // which tmux
-      .mockReturnValueOnce("/usr/bin/screen" as any) // which screen
-      .mockReturnValue("" as any); // screen -dmS ...
-
-    const result = await spawner.spawnAsync({
-      workspace: "/home/user/project",
-      message: "Build it",
-      systemPrompt: "ctx",
-      model: "opus",
-      ccgHome: "/tmp/test-ccg",
-      agentId: "salt",
-    });
-
-    const screenCalls = mockedExecSync.mock.calls.filter(
-      (c) => String(c[0]).includes("screen -dmS"),
-    );
-    expect(screenCalls.length).toBe(1);
-    expect(result.sessionName).toMatch(/^ccg-salt-[a-f0-9]{4}$/);
   });
 });

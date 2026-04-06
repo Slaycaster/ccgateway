@@ -26,7 +26,7 @@ export interface SessionManager {
 }
 
 export interface MessageRouter {
-  route(message: IncomingMessage): Promise<string>;
+  route(message: IncomingMessage, onChunk?: (accumulated: string) => void): Promise<string>;
   resolveAgent(gateway: string, channelId: string): string | undefined;
   resolveAgentByBot(gateway: string, botId: string): string | undefined;
 }

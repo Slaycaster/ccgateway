@@ -6,9 +6,8 @@ import type { SessionManager } from "../sessions.js";
 import type { ContextBuilder } from "../context.js";
 import type { CCSpawner } from "../spawner.js";
 import type { SpawnResult } from "../spawner.js";
-import type { AsyncTaskWatcher } from "../async-watcher.js";
 
-// ── Test data ─────────────────────────────────────────────────────────────
+// ── Test data ────────���────────────────────────────────────────────────────
 
 const AGENT_SALT: AgentConfig = {
   id: "salt",
@@ -58,7 +57,7 @@ function makeMessage(overrides: Partial<IncomingMessage> = {}): IncomingMessage 
   };
 }
 
-// ── Mocks ─────────────────────────────────────────────────────────────────
+// ── Mocks ────────────��───────────────���────────────────────────────────────
 
 function createMockAgents(): AgentRegistry {
   return {
@@ -100,31 +99,16 @@ function createMockSpawner(result?: Partial<SpawnResult>): CCSpawner {
   };
   return {
     spawn: vi.fn(async () => ({ ...defaultResult, ...result })),
-    triage: vi.fn(async () => "sync" as const),
-    spawnAsync: vi.fn(async () => ({
-      sessionName: "ccg-salt-a3f2",
-      taskDir: "/tmp/async-tasks/ccg-salt-a3f2",
-    })),
+    spawnStreaming: vi.fn(async (_opts: any, _onChunk?: any) => ({ ...defaultResult, ...result })),
   } as unknown as CCSpawner;
 }
 
-function createMockWatcher(): AsyncTaskWatcher {
-  return {
-    register: vi.fn(),
-    listTasks: vi.fn(() => []),
-    start: vi.fn(),
-    stop: vi.fn(),
-    isRunning: vi.fn(() => true),
-  } as unknown as AsyncTaskWatcher;
-}
-
-// ── Setup ─────────────────────────────────────────────────────────────────
+// ── Setup ─��────────────────────────────────���──────────────────────────────
 
 let agents: ReturnType<typeof createMockAgents>;
 let sessions: ReturnType<typeof createMockSessions>;
 let context: ReturnType<typeof createMockContext>;
 let spawner: ReturnType<typeof createMockSpawner>;
-let watcher: ReturnType<typeof createMockWatcher>;
 let router: MessageRouter;
 
 beforeEach(() => {
@@ -132,14 +116,12 @@ beforeEach(() => {
   sessions = createMockSessions();
   context = createMockContext();
   spawner = createMockSpawner();
-  watcher = createMockWatcher();
   router = new MessageRouter(
     agents,
     sessions,
     context,
     spawner,
     [BINDING_DISCORD, BINDING_SLACK, BINDING_PEPPER],
-    watcher,
   );
 });
 
@@ -147,7 +129,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// ── resolveAgent ──────────────────────────────────────────────────────────
+// ── resolveAgent ────���─────────────────────────────────────────────────────
 
 describe("resolveAgent", () => {
   it("returns correct agent for matching binding", () => {
@@ -171,7 +153,7 @@ describe("resolveAgent", () => {
   });
 });
 
-// ── route — full pipeline ─────────────────────────────────────────────────
+// ── route — full pipeline ───��─────────────────────────────────────────────
 
 describe("route — full pipeline", () => {
   it("calls the full pipeline in order: session -> context -> spawn -> save response", async () => {
@@ -310,7 +292,7 @@ describe("route — full pipeline", () => {
   });
 });
 
-// ── route — error handling ────────────────────────────────────────────────
+// ── route — error handling ────────────���───────────────────────────────────
 
 describe("route — error handling", () => {
   it("throws when agent not found", async () => {
@@ -372,11 +354,10 @@ describe("route — error handling", () => {
     const errorMsg = appendCalls[1][2];
     expect(errorMsg.content).toContain("[error]");
     expect(errorMsg.content).toContain("timed out");
-    expect(errorMsg.content).toContain("timeoutMs");
   });
 });
 
-// ── addBinding ────────────────────────────────────────────────────────────
+// ── addBinding ──────────��─────────────────────────────────────────────────
 
 describe("addBinding", () => {
   it("adds a binding to the bindings list", () => {
@@ -408,7 +389,7 @@ describe("addBinding", () => {
   });
 });
 
-// ── getBindingsForAgent ───────────────────────────────────────────────────
+// ── getBindingsForAgent ───────────────���─────────────────────────���─────────
 
 describe("getBindingsForAgent", () => {
   it("returns filtered bindings for an agent", () => {
@@ -444,82 +425,89 @@ describe("getPrimaryBinding", () => {
   });
 });
 
-// ── route — async path ───────────────────────────────────────────────────
+// ── route — streaming path ──────────────────────────────────────────────
 
-describe("route — async path", () => {
-  it("dispatches to tmux when triage returns async", async () => {
-    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("async");
+describe("route — streaming callback", () => {
+  it("uses spawnStreaming when onChunk callback is provided", async () => {
+    const onChunk = vi.fn();
+    const message = makeMessage();
 
-    const message = makeMessage({ content: "Refactor the entire auth system" });
+    await router.route(message, onChunk);
+
+    expect(spawner.spawnStreaming).toHaveBeenCalled();
+    expect(spawner.spawn).not.toHaveBeenCalled();
+  });
+
+  it("uses spawn (batch) when no onChunk callback is provided", async () => {
+    const message = makeMessage();
+
+    await router.route(message);
+
+    expect(spawner.spawn).toHaveBeenCalled();
+    expect(spawner.spawnStreaming).not.toHaveBeenCalled();
+  });
+
+  it("passes onChunk callback through to spawnStreaming", async () => {
+    const onChunk = vi.fn();
+    const message = makeMessage();
+
+    await router.route(message, onChunk);
+
+    const [, passedCallback] = (spawner.spawnStreaming as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(passedCallback).toBe(onChunk);
+  });
+});
+
+// ── route — trivial message short-circuit ─────���─────────────────────────
+
+describe("route — trivial message short-circuit", () => {
+  it("short-circuits 'thanks' without spawning", async () => {
+    const message = makeMessage({ content: "thanks" });
+
     const result = await router.route(message);
 
-    expect(spawner.triage).toHaveBeenCalled();
-    expect(spawner.spawnAsync).toHaveBeenCalled();
     expect(spawner.spawn).not.toHaveBeenCalled();
-    expect(watcher.register).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionName: "ccg-salt-a3f2",
-        agentId: "salt",
-        channel: "123456",
-      }),
-    );
-    expect(result).toContain("background");
-    expect(result).toContain("ccg-salt-a3f2");
+    expect(spawner.spawnStreaming).not.toHaveBeenCalled();
+    expect(result).toBeTruthy(); // some non-empty reply
   });
 
-  it("uses sync path when triage returns sync", async () => {
-    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("sync");
-
-    const message = makeMessage({ content: "What does this function do?" });
+  it("short-circuits 'thank you!' without spawning", async () => {
+    const message = makeMessage({ content: "thank you!" });
     await router.route(message);
-
-    expect(spawner.triage).toHaveBeenCalled();
-    expect(spawner.spawn).toHaveBeenCalled();
-    expect(spawner.spawnAsync).not.toHaveBeenCalled();
+    expect(spawner.spawn).not.toHaveBeenCalled();
   });
 
-  it("passes correct options to spawnAsync", async () => {
-    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("async");
-
-    const message = makeMessage();
+  it("short-circuits 'ok' without spawning", async () => {
+    const message = makeMessage({ content: "ok" });
     await router.route(message);
-
-    expect(spawner.spawnAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        workspace: AGENT_SALT.workspace,
-        model: "sonnet",
-        agentId: "salt",
-      }),
-    );
+    expect(spawner.spawn).not.toHaveBeenCalled();
   });
 
-  it("appends async placeholder to session history", async () => {
-    (spawner.triage as ReturnType<typeof vi.fn>).mockResolvedValue("async");
+  it("short-circuits '👍' without spawning", async () => {
+    const message = makeMessage({ content: "👍" });
+    await router.route(message);
+    expect(spawner.spawn).not.toHaveBeenCalled();
+  });
 
-    const message = makeMessage();
+  it("still appends user and assistant messages to session for trivial messages", async () => {
+    const message = makeMessage({ content: "thanks!" });
     await router.route(message);
 
     const appendCalls = (sessions.appendMessage as ReturnType<typeof vi.fn>).mock.calls;
-    expect(appendCalls).toHaveLength(2); // user + async placeholder
-    const assistantMsg = appendCalls[1][2];
-    expect(assistantMsg.role).toBe("assistant");
-    expect(assistantMsg.content).toContain("background");
+    expect(appendCalls).toHaveLength(2);
+    expect(appendCalls[0][2].role).toBe("user");
+    expect(appendCalls[1][2].role).toBe("assistant");
   });
 
-  it("skips triage when no watcher is configured", async () => {
-    // Create router without watcher
-    const routerNoWatcher = new MessageRouter(
-      agents,
-      sessions,
-      context,
-      spawner,
-      [BINDING_DISCORD, BINDING_SLACK, BINDING_PEPPER],
-    );
+  it("does NOT short-circuit real questions", async () => {
+    const message = makeMessage({ content: "thanks for explaining, can you also fix the bug?" });
+    await router.route(message);
+    expect(spawner.spawn).toHaveBeenCalled();
+  });
 
-    const message = makeMessage();
-    await routerNoWatcher.route(message);
-
-    expect(spawner.triage).not.toHaveBeenCalled();
+  it("does NOT short-circuit when content just contains trivial word", async () => {
+    const message = makeMessage({ content: "ok so how do I fix this?" });
+    await router.route(message);
     expect(spawner.spawn).toHaveBeenCalled();
   });
 });

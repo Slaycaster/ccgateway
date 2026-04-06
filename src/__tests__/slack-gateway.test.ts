@@ -7,6 +7,7 @@ const {
   mockAppStart,
   mockAppStop,
   mockPostMessage,
+  mockChatUpdate,
   mockReactionsAdd,
   mockReactionsRemove,
   MockApp,
@@ -15,7 +16,8 @@ const {
 } = vi.hoisted(() => {
   const mockAppStart = vi.fn(async () => {});
   const mockAppStop = vi.fn(async () => {});
-  const mockPostMessage = vi.fn(async () => ({}));
+  const mockPostMessage = vi.fn(async () => ({ ts: "1234567890.999999" }));
+  const mockChatUpdate = vi.fn(async () => ({}));
   const mockReactionsAdd = vi.fn(async () => ({}));
   const mockReactionsRemove = vi.fn(async () => ({}));
 
@@ -33,7 +35,7 @@ const {
       start: mockAppStart,
       stop: mockAppStop,
       client: {
-        chat: { postMessage: mockPostMessage },
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -49,6 +51,7 @@ const {
     mockAppStart,
     mockAppStop,
     mockPostMessage,
+    mockChatUpdate,
     mockReactionsAdd,
     mockReactionsRemove,
     MockApp,
@@ -270,7 +273,8 @@ describe("slack-gateway plugin", () => {
     resetMockApp();
     mockAppStart.mockReset().mockImplementation(async () => {});
     mockAppStop.mockReset().mockImplementation(async () => {});
-    mockPostMessage.mockReset().mockImplementation(async () => ({}));
+    mockPostMessage.mockReset().mockImplementation(async () => ({ ts: "1234567890.999999" }));
+    mockChatUpdate.mockReset().mockImplementation(async () => ({}));
     mockReactionsAdd.mockReset().mockImplementation(async () => ({}));
     mockReactionsRemove.mockReset().mockImplementation(async () => ({}));
   });
@@ -344,7 +348,8 @@ describe("slack-gateway message handling", () => {
     resetMockApp();
     mockAppStart.mockReset().mockImplementation(async () => {});
     mockAppStop.mockReset().mockImplementation(async () => {});
-    mockPostMessage.mockReset().mockImplementation(async () => ({}));
+    mockPostMessage.mockReset().mockImplementation(async () => ({ ts: "1234567890.999999" }));
+    mockChatUpdate.mockReset().mockImplementation(async () => ({}));
     mockReactionsAdd.mockReset().mockImplementation(async () => ({}));
     mockReactionsRemove.mockReset().mockImplementation(async () => ({}));
   });
@@ -380,6 +385,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage(),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -400,6 +406,7 @@ describe("slack-gateway message handling", () => {
         content: "Hello Salt",
         attachments: [],
       }),
+      expect.any(Function), // onChunk streaming callback
     );
   });
 
@@ -411,6 +418,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage({ user: "U_HACKER" }),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -430,6 +438,7 @@ describe("slack-gateway message handling", () => {
       message: { ...makeSlackMessage(), subtype: "bot_message" },
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -448,6 +457,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage({ channel: "C_UNKNOWN" }),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -466,6 +476,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage({ text: "/status" }),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -488,6 +499,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage({ text: "/new" }),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -510,6 +522,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage({ text: "/reset" }),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -535,6 +548,7 @@ describe("slack-gateway message handling", () => {
       }),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -542,7 +556,8 @@ describe("slack-gateway message handling", () => {
       },
     });
 
-    expect(say).toHaveBeenCalledWith(
+    // Initial "Thinking..." message should be posted in the thread
+    expect(mockPostMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         thread_ts: "1234567890.000001",
       }),
@@ -557,6 +572,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage(),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -564,14 +580,15 @@ describe("slack-gateway message handling", () => {
       },
     });
 
-    expect(say).toHaveBeenCalledWith(
+    // Initial "Thinking..." message should use message ts as thread
+    expect(mockPostMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         thread_ts: "1234567890.123456",
       }),
     );
   });
 
-  it("adds hourglass reaction while processing and removes after", async () => {
+  it("posts initial 'Thinking...' message before routing", async () => {
     await setupAndStart();
     const say = vi.fn(async () => ({}));
 
@@ -579,6 +596,10 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage(),
       say,
       client: {
+        chat: {
+          postMessage: mockPostMessage,
+          update: vi.fn(async () => ({})),
+        },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -586,19 +607,10 @@ describe("slack-gateway message handling", () => {
       },
     });
 
-    expect(mockReactionsAdd).toHaveBeenCalledWith(
+    expect(mockPostMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        name: "hourglass_flowing_sand",
         channel: "C001",
-        timestamp: "1234567890.123456",
-      }),
-    );
-
-    expect(mockReactionsRemove).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: "hourglass_flowing_sand",
-        channel: "C001",
-        timestamp: "1234567890.123456",
+        text: "Thinking...",
       }),
     );
   });
@@ -621,6 +633,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage(),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -628,8 +641,8 @@ describe("slack-gateway message handling", () => {
       },
     });
 
-    // Should have called say twice: once for error
-    expect(say).toHaveBeenCalledWith(
+    // Error should update the initial "Thinking..." message
+    expect(mockChatUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining("Agent exploded"),
       }),
@@ -652,6 +665,7 @@ describe("slack-gateway message handling", () => {
       message: makeSlackMessage(),
       say,
       client: {
+        chat: { postMessage: mockPostMessage, update: mockChatUpdate },
         reactions: {
           add: mockReactionsAdd,
           remove: mockReactionsRemove,
@@ -659,7 +673,8 @@ describe("slack-gateway message handling", () => {
       },
     });
 
-    expect(say).toHaveBeenCalledWith(
+    // Final response updates the initial "Thinking..." message with mrkdwn
+    expect(mockChatUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         text: "This is *bold* and _italic_",
         blocks: [

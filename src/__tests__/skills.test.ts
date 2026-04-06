@@ -223,21 +223,24 @@ describe("readSkill", () => {
 // ── buildSkillIndex ─────────────────────────────────────────────────────────
 
 describe("buildSkillIndex", () => {
-  it("formats correctly with available skills", async () => {
+  it("formats correctly with available skills (includes full content)", async () => {
     const mgr = new SkillManager(tempDir);
     await writeFile(
       join(tempDir, "skills", "create-pr.md"),
-      makeSkillContent("create-pr", "Create a pull request with conventional format"),
+      makeSkillContent("create-pr", "Create a pull request with conventional format", "Step 1: checkout branch"),
     );
     await writeFile(
       join(tempDir, "skills", "run-tests.md"),
-      makeSkillContent("run-tests", "Run test suite and report results"),
+      makeSkillContent("run-tests", "Run test suite and report results", "Run npm test"),
     );
 
     const index = await mgr.buildSkillIndex();
     expect(index).toContain("--- Available Skills ---");
-    expect(index).toContain("- create-pr: Create a pull request with conventional format");
-    expect(index).toContain("- run-tests: Run test suite and report results");
+    expect(index).toContain("=== Skill: create-pr ===");
+    expect(index).toContain("Create a pull request with conventional format");
+    expect(index).toContain("Step 1: checkout branch");
+    expect(index).toContain("=== Skill: run-tests ===");
+    expect(index).toContain("Run npm test");
   });
 
   it("shows (none) when no skills exist", async () => {

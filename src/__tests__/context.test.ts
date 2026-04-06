@@ -133,12 +133,10 @@ describe("build — skill index", () => {
     const context = await builder.build("salt", key);
 
     expect(context).toContain("--- Available Skills ---");
-    expect(context).toContain(
-      "- create-pr: Create a pull request with conventional format",
-    );
-    expect(context).toContain(
-      "- run-tests: Run test suite and report results",
-    );
+    expect(context).toContain("=== Skill: create-pr ===");
+    expect(context).toContain("Create a pull request with conventional format");
+    expect(context).toContain("=== Skill: run-tests ===");
+    expect(context).toContain("Run test suite and report results");
   });
 
   it("shows (none) when no skills exist", async () => {

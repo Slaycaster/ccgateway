@@ -18,6 +18,14 @@ interface SlackGatewayConfig {
   commands: string[];
 }
 
+// ── Constants ────────────────────────────────────────────────────────────
+
+/** Minimum interval between Slack message updates (rate-limit safe). */
+const UPDATE_THROTTLE_MS = 1500;
+
+/** Slack message character limit (practical safe limit). */
+const SLACK_CHAR_LIMIT = 3900;
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /**
@@ -134,6 +142,9 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
   const bots: BotInstance[] = [];
   const resolvedTokens = new Map<string, { token: string; signingSecret?: string; appToken: string }>();
 
+  // Per-channel message queue — prevents concurrent spawns for the same channel.
+  const channelLocks = new Map<string, Promise<void>>();
+
   /**
    * Send a message to a specific channel using a specific bot.
    */
@@ -205,6 +216,23 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       const text = message.text ?? "";
       const channelId = message.channel;
       const messageTs = message.ts;
+
+      // Per-channel queue — serialize so only one spawn runs at a time
+      const lockKey = `${botId}:${channelId}`;
+      const prev = channelLocks.get(lockKey) ?? Promise.resolve();
+      const current = prev.then(
+        () => handleSlackMsg(),
+        () => handleSlackMsg(),
+      );
+      channelLocks.set(lockKey, current);
+      current.finally(() => {
+        if (channelLocks.get(lockKey) === current) {
+          channelLocks.delete(lockKey);
+        }
+      });
+      return current;
+
+      async function handleSlackMsg(): Promise<void> {
       const threadTs = "thread_ts" in message ? message.thread_ts : undefined;
 
       logger.info(`slack: bot "${botId}" received message in channel ${channelId} from user ${userId}`);
@@ -238,16 +266,48 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
         return;
       }
 
-      // Add hourglass reaction while processing
+      // Post initial "Thinking..." message that we'll update with streaming content
+      const replyTs = threadTs ?? messageTs;
+      let initialMsg: { ts?: string } | undefined;
       try {
-        await client.reactions.add({
+        initialMsg = await client.chat.postMessage({
           channel: channelId,
-          timestamp: messageTs,
-          name: "hourglass_flowing_sand",
-        });
+          text: "Thinking...",
+          thread_ts: replyTs,
+        }) as { ts?: string };
       } catch {
-        // Reaction may fail if already added or permissions issue; non-fatal
+        // Fallback: use say() if postMessage fails
+        initialMsg = await say({ text: "Thinking...", thread_ts: replyTs }) as { ts?: string };
       }
+
+      const sentTs = initialMsg?.ts;
+      let lastUpdateTime = 0;
+
+      // Throttled streaming callback — updates the message at most every UPDATE_THROTTLE_MS
+      const onChunk = (accumulated: string) => {
+        if (!sentTs) return;
+        const now = Date.now();
+        if (now - lastUpdateTime < UPDATE_THROTTLE_MS) return;
+        lastUpdateTime = now;
+
+        const mrkdwn = markdownToMrkdwn(accumulated);
+        const preview =
+          mrkdwn.length > SLACK_CHAR_LIMIT - 3
+            ? mrkdwn.slice(0, SLACK_CHAR_LIMIT - 3) + "..."
+            : mrkdwn;
+
+        client.chat.update({
+          channel: channelId,
+          ts: sentTs,
+          text: preview,
+          blocks: [
+            {
+              type: "section",
+              text: { type: "mrkdwn", text: preview },
+            },
+          ],
+        }).catch(() => {});
+      };
 
       try {
         // Extract file attachments (Slack files require bot token to download)
@@ -291,45 +351,59 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
           attachments,
         };
 
-        // Route the message
-        const response = await core.router.route(incoming);
+        // Route the message with streaming callback
+        const response = await core.router.route(incoming, onChunk);
 
-        // Convert and send response
+        // Final update: replace initial message + send overflow chunks
         const mrkdwn = markdownToMrkdwn(response);
         const chunks = splitMessage(mrkdwn);
 
-        for (const chunk of chunks) {
-          await say({
-            text: chunk,
+        if (sentTs) {
+          await client.chat.update({
+            channel: channelId,
+            ts: sentTs,
+            text: chunks[0],
             blocks: [
               {
                 type: "section",
-                text: { type: "mrkdwn", text: chunk },
+                text: { type: "mrkdwn", text: chunks[0] },
               },
             ],
-            thread_ts: threadTs ?? messageTs,
+          });
+        }
+
+        // Send remaining chunks as new messages
+        for (let i = sentTs ? 1 : 0; i < chunks.length; i++) {
+          await say({
+            text: chunks[i],
+            blocks: [
+              {
+                type: "section",
+                text: { type: "mrkdwn", text: chunks[i] },
+              },
+            ],
+            thread_ts: replyTs,
           });
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         logger.error(`slack: error handling message: ${errMsg}`);
 
-        await say({
-          text: `:warning: Error: ${errMsg}`,
-          thread_ts: threadTs ?? messageTs,
-        });
-      } finally {
-        // Remove hourglass reaction
-        try {
-          await client.reactions.remove({
+        // Update initial message with error, or send new error message
+        if (sentTs) {
+          await client.chat.update({
             channel: channelId,
-            timestamp: messageTs,
-            name: "hourglass_flowing_sand",
+            ts: sentTs,
+            text: `:warning: Error: ${errMsg}`,
+          }).catch(() => {});
+        } else {
+          await say({
+            text: `:warning: Error: ${errMsg}`,
+            thread_ts: replyTs,
           });
-        } catch {
-          // Non-fatal
         }
       }
+      } // end handleSlackMsg
     });
   }
 

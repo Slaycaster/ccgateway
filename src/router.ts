@@ -1,13 +1,28 @@
 import type { AgentRegistry } from "./agents.js";
-import type { AsyncTaskWatcher } from "./async-watcher.js";
 import type { SessionManager } from "./sessions.js";
 import type { ContextBuilder } from "./context.js";
-import type { CCSpawner, ImageInput } from "./spawner.js";
+import type { CCSpawner, ImageInput, StreamCallback } from "./spawner.js";
 import type { IncomingMessage, Attachment, BindingConfig } from "./types.js";
-import { getCcgHome } from "./config.js";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// ── Trivial message short-circuit ─────────────────────────────────────────
+
+const TRIVIAL_PATTERN =
+  /^(thanks|thank you|ty|thx|ok|okay|k|got it|cool|nice|great|awesome|perfect|sounds good|lgtm|np|no worries|👍|🙏|❤️|💯)[\s!.\-]*$/i;
+
+const TRIVIAL_REPLIES = [
+  "You're welcome!",
+  "Anytime!",
+  "Happy to help!",
+  "No problem!",
+  "Glad I could help!",
+];
+
+function pickTrivialReply(): string {
+  return TRIVIAL_REPLIES[Math.floor(Math.random() * TRIVIAL_REPLIES.length)];
+}
 
 // ── MessageRouter ─────────────────────────────────────────────────────────
 
@@ -18,7 +33,6 @@ export class MessageRouter {
     private context: ContextBuilder,
     private spawner: CCSpawner,
     private bindings: BindingConfig[],
-    private watcher?: AsyncTaskWatcher,
   ) {}
 
   /**
@@ -47,15 +61,22 @@ export class MessageRouter {
    * Full message dispatch pipeline.
    *
    * 1. Look up agent config from registry
-   * 2. Derive session key: {agentId}:{gateway}:{channel}
-   * 3. Get or create session
-   * 4. Append user message to session
-   * 5. Build context
-   * 6. Spawn claude --print
-   * 7. Append assistant response to session (or error on failure)
-   * 8. Return response text
+   * 2. Short-circuit trivial messages (thanks, ok, etc.)
+   * 3. Derive session key: {agentId}:{gateway}:{channel}
+   * 4. Get or create session
+   * 5. Append user message to session
+   * 6. Build context
+   * 7. Spawn claude with streaming (or batch if no onChunk)
+   * 8. Append assistant response to session (or error on failure)
+   * 9. Return response text
+   *
+   * When `onChunk` is provided, uses the streaming spawner so callers
+   * (Discord, Slack) can relay incremental text to the user in real time.
    */
-  async route(message: IncomingMessage): Promise<string> {
+  async route(
+    message: IncomingMessage,
+    onChunk?: StreamCallback,
+  ): Promise<string> {
     const agentId = message.to.agent;
 
     // 1. Get agent config
@@ -64,14 +85,40 @@ export class MessageRouter {
       throw new Error(`Agent "${agentId}" not found in registry`);
     }
 
-    // 2. Derive session key
+    // 2. Short-circuit trivial messages
+    if (TRIVIAL_PATTERN.test(message.content.trim())) {
+      const reply = pickTrivialReply();
+      // Still persist to session for continuity
+      const sessionKey = this.sessions.getOrCreateSession(
+        agentId,
+        message.from.gateway,
+        message.from.channel,
+      );
+      await this.sessions.appendMessage(agentId, sessionKey, {
+        role: "user",
+        content: message.content,
+        ts: Date.now(),
+        source: message.from.gateway,
+        sourceUser: message.from.user,
+        sourceMessageId: message.from.messageId,
+      });
+      await this.sessions.appendMessage(agentId, sessionKey, {
+        role: "assistant",
+        content: reply,
+        ts: Date.now(),
+        tokens: { in: 0, out: 0 },
+      });
+      return reply;
+    }
+
+    // 3. Derive session key
     const sessionKey = this.sessions.getOrCreateSession(
       agentId,
       message.from.gateway,
       message.from.channel,
     );
 
-    // 3. Append user message to session
+    // 4. Append user message to session
     await this.sessions.appendMessage(agentId, sessionKey, {
       role: "user",
       content: message.content,
@@ -81,7 +128,7 @@ export class MessageRouter {
       sourceMessageId: message.from.messageId,
     });
 
-    // 4. Download attachments (if any)
+    // 5. Download attachments (if any)
     //    Images  → base64 in-memory, passed as content blocks (no Read-tool round-trip)
     //    Other   → saved to temp dir so Claude can read them via the Read tool
     let attachmentDir: string | undefined;
@@ -106,76 +153,11 @@ export class MessageRouter {
       }
     }
 
-    // 5. Build context
+    // 6. Build context
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
-    // 5.5 Triage: should this run async?
-    //     Images always go async — they're slow on Opus and the user gets
-    //     instant feedback instead of waiting 10+ minutes.
-    const mode = this.watcher
-      ? images.length > 0
-        ? ("async" as const)
-        : await this.spawner.triage(messageContent, agent.model)
-      : ("sync" as const);
-
-    if (mode === "async") {
-      // For async tasks with images: save images to temp files in the
-      // workspace so Claude Code can read them via the Read tool.
-      let asyncMessage = messageContent;
-      let asyncAttachDir: string | undefined;
-
-      if (images.length > 0) {
-        const dir = join(agent.workspace, `.ccg-attachments-${Date.now()}`);
-        await mkdir(dir, { recursive: true });
-        asyncAttachDir = dir;
-
-        const paths: string[] = [];
-        for (let i = 0; i < images.length; i++) {
-          const ext = images[i].mediaType.split("/")[1] || "png";
-          const filePath = join(dir, `image-${i}.${ext}`);
-          await writeFile(filePath, Buffer.from(images[i].base64, "base64"));
-          paths.push(filePath);
-        }
-        const fileList = paths.map((p) => `  - ${p}`).join("\n");
-        asyncMessage += `\n\n[Attached images — use the Read tool to view them]\n${fileList}`;
-      }
-
-      const { sessionName, taskDir } = await this.spawner.spawnAsync({
-        workspace: agent.workspace,
-        message: asyncMessage,
-        systemPrompt,
-        model: agent.model,
-        ccgHome: getCcgHome(),
-        agentId,
-      });
-
-      // Register with watcher
-      const binding = this.bindings.find((b) => b.agent === agentId);
-      this.watcher!.register({
-        sessionName,
-        taskDir,
-        agentId,
-        gateway: message.from.gateway,
-        channel: message.from.channel,
-        botId: binding?.bot ?? agentId,
-        sessionKey,
-        workspace: agent.workspace,
-        startedAt: Date.now(),
-      });
-
-      const placeholder = `On it — working on this in the background. I'll get back to you when it's done. (tmux: \`${sessionName}\`)`;
-      await this.sessions.appendMessage(agentId, sessionKey, {
-        role: "assistant",
-        content: placeholder,
-        ts: Date.now(),
-        tokens: { in: 0, out: 0 },
-      });
-
-      return placeholder;
-    }
-
-    // 6. Spawn claude --print (sync path — unchanged)
-    const result = await this.spawner.spawn({
+    // 7. Spawn claude
+    const spawnOptions = {
       workspace: agent.workspace,
       message: messageContent,
       systemPrompt,
@@ -183,19 +165,23 @@ export class MessageRouter {
       allowedTools: agent.allowedTools,
       ...(agent.timeoutMs ? { timeoutMs: agent.timeoutMs } : {}),
       ...(images.length > 0 ? { images } : {}),
-    });
+    };
 
-    // 7. Clean up attachment temp dir
+    const result = onChunk
+      ? await this.spawner.spawnStreaming(spawnOptions, onChunk)
+      : await this.spawner.spawn(spawnOptions);
+
+    // 8. Clean up attachment temp dir
     if (attachmentDir) {
       rm(attachmentDir, { recursive: true, force: true }).catch(() => {});
     }
 
-    // 8. Handle failure: append error to session and throw
+    // 9. Handle failure: append error to session and throw
     if (result.exitCode !== 0) {
       const isTimeout = result.exitCode === 124;
       const stderrHint = result.stderr ? `\n\nDetails: ${result.stderr.slice(0, 500)}` : "";
       const errorContent = isTimeout
-        ? "The task timed out — it took longer than the allowed time. Try breaking it into smaller steps, or increase the agent's `timeoutMs` setting."
+        ? "The task timed out — no activity was detected for over 2 minutes. Try breaking it into smaller steps."
         : (result.response || `Spawner failed with exit code ${result.exitCode}`) + stderrHint;
       await this.sessions.appendMessage(agentId, sessionKey, {
         role: "assistant",
@@ -206,7 +192,7 @@ export class MessageRouter {
       throw new Error(errorContent);
     }
 
-    // 9. Append assistant response to session
+    // 10. Append assistant response to session
     await this.sessions.appendMessage(agentId, sessionKey, {
       role: "assistant",
       content: result.response,
@@ -214,7 +200,7 @@ export class MessageRouter {
       tokens: result.tokensEstimate,
     });
 
-    // 10. Return response text (guard against empty responses)
+    // 11. Return response text (guard against empty responses)
     return result.response.trim() || "(no response)";
   }
 
