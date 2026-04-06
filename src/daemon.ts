@@ -8,6 +8,7 @@ import { MessageRouter } from './router.js';
 import { PluginLoader } from './plugin.js';
 import type { CcgCore, CcgPlugin } from './plugin.js';
 import { CrossAgentMessenger } from './messaging.js';
+import { AsyncTaskWatcher } from './async-watcher.js';
 import { createIpcServer, socketPath } from './ipc.js';
 import { configureLogger, logger } from './logger.js';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, statSync } from 'node:fs';
@@ -49,16 +50,48 @@ export async function startDaemon(): Promise<void> {
   const skills = new SkillManager(ccgHome);
   const context = new ContextBuilder(sessions, skills, ccgHome, registry);
   const spawner = new CCSpawner();
+
+  // 5. Create PluginLoader (needed by watcher callbacks)
+  const loader = new PluginLoader();
+
+  // 5.5 Create async task watcher
+  const watcher = new AsyncTaskWatcher({
+    sendToChannel: async (channel, botId, content) => {
+      const gatewayPlugins = loader.getPluginsByType("gateway");
+      for (const plugin of gatewayPlugins) {
+        const gw = plugin as unknown as Record<string, unknown>;
+        if (typeof gw.sendToChannel === "function") {
+          try {
+            await (gw.sendToChannel as (c: string, b: string, t: string) => Promise<void>)(channel, botId, content);
+            return;
+          } catch {
+            // try next gateway
+          }
+        }
+      }
+      logger.error(`async-watcher: no gateway could deliver result to channel ${channel}`);
+    },
+    appendToSession: async (agentId, sessionKey, content, tokens) => {
+      await sessions.appendMessage(agentId, sessionKey, {
+        role: "assistant",
+        content,
+        ts: Date.now(),
+        tokens,
+      });
+    },
+  });
+
+  // 5.6 Create router (needs watcher)
   const router = new MessageRouter(
     registry,
     sessions,
     context,
     spawner,
     config.bindings,
+    watcher,
   );
 
-  // 5. Create PluginLoader and messenger (messenger needs loader reference)
-  const loader = new PluginLoader();
+  // 5.7 Create messenger (needs loader and router)
   const messenger = new CrossAgentMessenger(
     registry,
     config.bindings,
@@ -100,6 +133,9 @@ export async function startDaemon(): Promise<void> {
   // 8. Start all plugins
   await loader.startAll();
 
+  // 8.5 Start async task watcher
+  watcher.start();
+
   // 9. Start IPC server for cross-agent messaging from CLI
   const ipcServer = createIpcServer(async (toAgent, content, fromAgent) => {
     await messenger.send(toAgent, content, fromAgent);
@@ -112,6 +148,7 @@ export async function startDaemon(): Promise<void> {
   // 11. Set up signal handlers for graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`ccgateway received ${signal}, shutting down...`);
+    watcher.stop();
     try {
       ipcServer.close();
       removeSocketFile();
