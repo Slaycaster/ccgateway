@@ -6,11 +6,22 @@ import { EventEmitter } from "node:events";
 
 vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
+  execSync: vi.fn(),
 }));
 
-import { spawn } from "node:child_process";
+vi.mock("node:fs", () => ({
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+}));
+
+vi.mock("node:crypto", () => ({
+  randomBytes: vi.fn(() => Buffer.from([0xa3, 0xf2])),
+}));
+
+import { spawn, execSync } from "node:child_process";
 
 const mockedSpawn = vi.mocked(spawn);
+const mockedExecSync = vi.mocked(execSync);
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -604,5 +615,100 @@ describe("parseStreamOutput", () => {
 
   it("handles empty output", () => {
     expect(parseStreamOutput("")).toBe("");
+  });
+});
+
+// ── Tests — detectMultiplexer ────────────────────────────────────────────
+
+describe("detectMultiplexer", () => {
+  it("returns 'tmux' when tmux is available", () => {
+    mockedExecSync.mockReturnValueOnce("/usr/bin/tmux" as any);
+    expect((spawner as any).detectMultiplexer()).toBe("tmux");
+  });
+
+  it("returns 'screen' when tmux is not available but screen is", () => {
+    mockedExecSync
+      .mockImplementationOnce(() => { throw new Error("not found"); })
+      .mockReturnValueOnce("/usr/bin/screen" as any);
+    expect((spawner as any).detectMultiplexer()).toBe("screen");
+  });
+
+  it("throws when neither is available", () => {
+    mockedExecSync.mockImplementation(() => { throw new Error("not found"); });
+    expect(() => (spawner as any).detectMultiplexer()).toThrow(
+      "Neither tmux nor screen is installed",
+    );
+  });
+});
+
+// ── Tests — spawnAsync ───────────────────────────────────────────────────
+
+describe("spawnAsync", () => {
+  beforeEach(() => {
+    // Default: tmux available, then allow all other execSync calls
+    mockedExecSync.mockReturnValue("" as any);
+  });
+
+  it("returns sessionName and taskDir immediately", async () => {
+    // First call: which tmux (detectMultiplexer)
+    // Second call: tmux new-session
+    mockedExecSync.mockReturnValue("/usr/bin/tmux" as any);
+
+    const result = await spawner.spawnAsync({
+      workspace: "/home/user/project",
+      message: "Refactor the auth module",
+      systemPrompt: "You are an assistant",
+      model: "opus",
+      ccgHome: "/home/user/.ccgateway",
+      agentId: "salt",
+    });
+
+    expect(result.sessionName).toMatch(/^ccg-salt-[a-f0-9]{4}$/);
+    expect(result.taskDir).toContain("async-tasks");
+    expect(result.taskDir).toContain(result.sessionName);
+  });
+
+  it("spawns tmux new-session with correct arguments", async () => {
+    mockedExecSync.mockReturnValue("" as any);
+
+    await spawner.spawnAsync({
+      workspace: "/home/user/project",
+      message: "Build feature X",
+      systemPrompt: "You are helpful",
+      model: "opus",
+      ccgHome: "/tmp/test-ccg",
+      agentId: "salt",
+    });
+
+    const tmuxCalls = mockedExecSync.mock.calls.filter(
+      (c) => String(c[0]).includes("tmux new-session"),
+    );
+    expect(tmuxCalls.length).toBe(1);
+    const cmd = String(tmuxCalls[0][0]);
+    expect(cmd).toContain("--dangerously-skip-permissions");
+    expect(cmd).toContain("--model opus");
+    expect(cmd).toContain("Build feature X");
+  });
+
+  it("uses screen fallback when tmux is unavailable", async () => {
+    mockedExecSync
+      .mockImplementationOnce(() => { throw new Error("not found"); }) // which tmux
+      .mockReturnValueOnce("/usr/bin/screen" as any) // which screen
+      .mockReturnValue("" as any); // screen -dmS ...
+
+    const result = await spawner.spawnAsync({
+      workspace: "/home/user/project",
+      message: "Build it",
+      systemPrompt: "ctx",
+      model: "opus",
+      ccgHome: "/tmp/test-ccg",
+      agentId: "salt",
+    });
+
+    const screenCalls = mockedExecSync.mock.calls.filter(
+      (c) => String(c[0]).includes("screen -dmS"),
+    );
+    expect(screenCalls.length).toBe(1);
+    expect(result.sessionName).toMatch(/^ccg-salt-[a-f0-9]{4}$/);
   });
 });

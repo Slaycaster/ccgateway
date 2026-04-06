@@ -1,4 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -12,6 +15,20 @@ export interface SpawnResult {
 export interface ImageInput {
   base64: string;
   mediaType: string;
+}
+
+export interface AsyncSpawnOptions {
+  workspace: string;
+  message: string;
+  systemPrompt: string;
+  model: string;
+  ccgHome: string;
+  agentId: string;
+}
+
+export interface AsyncSpawnResult {
+  sessionName: string;
+  taskDir: string;
 }
 
 export interface SpawnOptions {
@@ -101,6 +118,59 @@ User request:`;
   async spawn(options: SpawnOptions): Promise<SpawnResult> {
     const hasImages = options.images && options.images.length > 0;
     return hasImages ? this.spawnStreamJson(options) : this.spawnText(options);
+  }
+
+  // ── Multiplexer detection ────────────────────────────────────────────
+
+  private detectMultiplexer(): "tmux" | "screen" {
+    try {
+      execSync("which tmux", { stdio: "pipe" });
+      return "tmux";
+    } catch {
+      // tmux not found, try screen
+    }
+    try {
+      execSync("which screen", { stdio: "pipe" });
+      return "screen";
+    } catch {
+      // screen not found either
+    }
+    throw new Error(
+      "Neither tmux nor screen is installed. Install one to use async tasks.",
+    );
+  }
+
+  // ── Async spawn (background task via tmux/screen) ───────────────────
+
+  async spawnAsync(options: AsyncSpawnOptions): Promise<AsyncSpawnResult> {
+    const { workspace, message, systemPrompt, model, ccgHome, agentId } = options;
+    const mux = this.detectMultiplexer();
+
+    const shortId = randomBytes(2).toString("hex");
+    const sessionName = `ccg-${agentId}-${shortId}`;
+    const taskDir = join(ccgHome, "async-tasks", sessionName);
+
+    mkdirSync(taskDir, { recursive: true });
+
+    // Write system prompt + result instruction
+    const instructions = `${systemPrompt}\n\nWhen you are completely finished with the task, write a concise summary of what you did to: ${join(taskDir, "RESULT.md")}`;
+    writeFileSync(join(taskDir, "INSTRUCTIONS.md"), instructions, "utf-8");
+
+    const outputLog = join(taskDir, "output.log");
+    const instructionsFile = join(taskDir, "INSTRUCTIONS.md");
+
+    // Escape single quotes in message for shell
+    const escapedMessage = message.replace(/'/g, "'\\''");
+
+    if (mux === "tmux") {
+      const cmd = `tmux new-session -d -s ${sessionName} -c '${workspace}' "claude --dangerously-skip-permissions --append-system-prompt-file '${instructionsFile}' --model ${model} -p '${escapedMessage}' 2>&1 | tee '${outputLog}'"`;
+      execSync(cmd, { stdio: "pipe" });
+    } else {
+      const cmd = `screen -dmS ${sessionName} bash -c "cd '${workspace}' && claude --dangerously-skip-permissions --append-system-prompt-file '${instructionsFile}' --model ${model} -p '${escapedMessage}' 2>&1 | tee '${outputLog}'"`;
+      execSync(cmd, { stdio: "pipe" });
+    }
+
+    return { sessionName, taskDir };
   }
 
   // ── Text-only path ────────────────────────────────────────────────────
