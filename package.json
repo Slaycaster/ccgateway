@@ -1,6 +1,6 @@
 {
   "name": "ccgateway",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Multi-agent orchestration layer built on Claude Code CLI",
   "type": "module",
   "license": "MIT",
