@@ -214,8 +214,8 @@ export class MessageRouter {
       tokens: result.tokensEstimate,
     });
 
-    // 10. Return response text
-    return result.response;
+    // 10. Return response text (guard against empty responses)
+    return result.response.trim() || "(no response)";
   }
 
   /**
