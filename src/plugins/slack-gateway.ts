@@ -250,6 +250,33 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       }
 
       try {
+        // Extract file attachments (Slack files require bot token to download)
+        const attachments: IncomingMessage["attachments"] = [];
+        if ("files" in message && Array.isArray(message.files)) {
+          const bot = bots.find((b) => b.botId === botId);
+          const token = bot ? resolvedTokens.get(botId)?.token : undefined;
+
+          for (const file of message.files) {
+            const url = file.url_private_download ?? file.url_private;
+            if (!url) continue;
+
+            try {
+              const resp = await fetch(url, {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+              });
+              if (!resp.ok) continue;
+
+              attachments.push({
+                type: file.mimetype ?? "application/octet-stream",
+                data: Buffer.from(await resp.arrayBuffer()),
+                filename: file.name ?? undefined,
+              });
+            } catch {
+              // Skip failed downloads
+            }
+          }
+        }
+
         // Build IncomingMessage
         const incoming: IncomingMessage = {
           from: {
@@ -261,7 +288,7 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
           },
           to: { agent: agentId },
           content: text,
-          attachments: [],
+          attachments,
         };
 
         // Route the message

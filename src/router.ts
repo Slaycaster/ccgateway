@@ -1,7 +1,7 @@
 import type { AgentRegistry } from "./agents.js";
 import type { SessionManager } from "./sessions.js";
 import type { ContextBuilder } from "./context.js";
-import type { CCSpawner } from "./spawner.js";
+import type { CCSpawner, ImageInput } from "./spawner.js";
 import type { IncomingMessage, Attachment, BindingConfig } from "./types.js";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -78,20 +78,28 @@ export class MessageRouter {
       sourceMessageId: message.from.messageId,
     });
 
-    // 4. Download attachments (if any) so Claude can read them
+    // 4. Download attachments (if any)
+    //    Images  → base64 in-memory, passed as content blocks (no Read-tool round-trip)
+    //    Other   → saved to temp dir so Claude can read them via the Read tool
     let attachmentDir: string | undefined;
     let messageContent = message.content;
+    const images: ImageInput[] = [];
+
     if (message.attachments.length > 0) {
-      const result = await this.downloadAttachments(
-        message.attachments,
-        agent.workspace,
-      );
+      const result = await this.downloadAttachments(message.attachments);
       attachmentDir = result.dir;
-      if (result.paths.length > 0) {
-        const fileList = result.paths
+      images.push(...result.images);
+
+      if (result.filePaths.length > 0) {
+        const fileList = result.filePaths
           .map((p) => `  - ${p}`)
           .join("\n");
         messageContent += `\n\n[Attached files — use the Read tool to view them]\n${fileList}`;
+      }
+
+      if (result.rejected.length > 0) {
+        const rejectedList = result.rejected.join(", ");
+        messageContent += `\n\n[Rejected attachments (blocked file type): ${rejectedList}]`;
       }
     }
 
@@ -106,6 +114,7 @@ export class MessageRouter {
       model: agent.model,
       allowedTools: agent.allowedTools,
       ...(agent.timeoutMs ? { timeoutMs: agent.timeoutMs } : {}),
+      ...(images.length > 0 ? { images } : {}),
     });
 
     // 7. Clean up attachment temp dir
@@ -163,34 +172,122 @@ export class MessageRouter {
   }
 
   /**
-   * Download attachments to a temp directory and return their local paths.
+   * Download attachments, separating images (kept as base64 in-memory)
+   * from other files (saved to a temp directory for Read-tool access).
+   * Rejects blocked file types (executables, archives, etc.).
    */
   private async downloadAttachments(
     attachments: Attachment[],
-    workspace: string,
-  ): Promise<{ dir: string; paths: string[] }> {
+  ): Promise<{ dir: string; filePaths: string[]; images: ImageInput[]; rejected: string[] }> {
     const dir = join(tmpdir(), `ccg-attach-${Date.now()}`);
-    await mkdir(dir, { recursive: true });
-
-    const paths: string[] = [];
+    const filePaths: string[] = [];
+    const images: ImageInput[] = [];
+    const rejected: string[] = [];
+    let dirCreated = false;
 
     for (const att of attachments) {
-      if (!att.url) continue;
+      if (!att.url && !att.data) continue;
+
+      const filename = att.filename || "attachment";
+
+      if (isBlockedAttachment(att.type, filename)) {
+        rejected.push(filename);
+        continue;
+      }
 
       try {
-        const resp = await fetch(att.url);
-        if (!resp.ok) continue;
+        // Use pre-downloaded data if available, otherwise fetch from URL
+        let buffer: Buffer;
+        if (att.data) {
+          buffer = att.data;
+        } else {
+          const resp = await fetch(att.url!);
+          if (!resp.ok) continue;
+          buffer = Buffer.from(await resp.arrayBuffer());
+        }
 
-        const buffer = Buffer.from(await resp.arrayBuffer());
-        const filename = att.filename || `attachment-${paths.length}`;
-        const filePath = join(dir, filename);
-        await writeFile(filePath, buffer);
-        paths.push(filePath);
+        if (att.type.startsWith("image/")) {
+          images.push({
+            base64: buffer.toString("base64"),
+            mediaType: att.type,
+          });
+        } else {
+          if (!dirCreated) {
+            await mkdir(dir, { recursive: true });
+            dirCreated = true;
+          }
+          const filePath = join(dir, filename);
+          await writeFile(filePath, buffer);
+          filePaths.push(filePath);
+        }
       } catch {
         // Skip failed downloads
       }
     }
 
-    return { dir, paths };
+    return { dir, filePaths, images, rejected };
   }
+}
+
+// ── Attachment filtering ──────────────────────────────────────────────────
+
+/** MIME types that are never allowed through. */
+const BLOCKED_MIME_PREFIXES = [
+  "application/x-executable",
+  "application/x-msdos-program",
+  "application/x-msdownload",
+  "application/x-sharedlib",
+  "application/x-dosexec",
+  "application/vnd.microsoft.portable-executable",
+];
+
+const BLOCKED_MIME_EXACT = new Set([
+  "application/x-sh",
+  "application/x-csh",
+  "application/x-bat",
+  "application/x-msi",
+  "application/java-archive",
+  "application/x-rar-compressed",
+  "application/x-7z-compressed",
+  "application/x-tar",
+  "application/gzip",
+  "application/zip",
+  "application/x-bzip2",
+  "application/x-xz",
+  "application/x-iso9660-image",
+  "application/x-apple-diskimage",
+  "application/vnd.debian.binary-package",
+  "application/x-rpm",
+]);
+
+/** File extensions that are never allowed through (lowercase, with dot). */
+const BLOCKED_EXTENSIONS = new Set([
+  // Executables & scripts
+  ".exe", ".bat", ".cmd", ".com", ".msi", ".scr", ".pif",
+  ".sh", ".bash", ".csh", ".ksh", ".zsh",
+  ".ps1", ".psm1", ".psd1", ".vbs", ".vbe", ".wsf", ".wsh",
+  // Compiled / bytecode
+  ".dll", ".so", ".dylib", ".sys", ".drv", ".o", ".obj",
+  ".class", ".jar", ".war", ".ear",
+  // Archives
+  ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z",
+  ".rar", ".iso", ".dmg", ".img",
+  // Packages
+  ".deb", ".rpm", ".apk", ".snap", ".flatpak",
+  ".whl", ".gem", ".nupkg",
+]);
+
+/** Returns true if the attachment should be rejected. */
+export function isBlockedAttachment(mimeType: string, filename: string): boolean {
+  const mime = mimeType.toLowerCase();
+
+  if (BLOCKED_MIME_EXACT.has(mime)) return true;
+  if (BLOCKED_MIME_PREFIXES.some((p) => mime.startsWith(p))) return true;
+
+  const ext = filename.lastIndexOf(".") >= 0
+    ? filename.slice(filename.lastIndexOf(".")).toLowerCase()
+    : "";
+  if (ext && BLOCKED_EXTENSIONS.has(ext)) return true;
+
+  return false;
 }
