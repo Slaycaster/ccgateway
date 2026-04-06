@@ -472,6 +472,93 @@ describe("spawn — image support (stream-json mode)", () => {
   });
 });
 
+// ── Tests — triage — sync vs async classification ────────────────────────
+
+describe("triage — sync vs async classification", () => {
+  it('returns "sync" for simple questions', async () => {
+    mockSpawnResult("sync");
+
+    const promise = spawner.triage("What is a closure?", "sonnet");
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe("sync");
+  });
+
+  it('returns "async" for intensive tasks', async () => {
+    mockSpawnResult("async");
+
+    const promise = spawner.triage(
+      "Refactor the entire auth module to use OAuth2",
+      "sonnet",
+    );
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe("async");
+  });
+
+  it('defaults to "sync" on timeout', async () => {
+    const child = createMockChild();
+    mockedSpawn.mockReturnValue(child as any);
+
+    const promise = spawner.triage("Some task", "sonnet");
+
+    // Advance past the 15s triage timeout
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+    // Process exits after being killed
+    child.emit("close", null);
+
+    const result = await promise;
+    expect(result).toBe("sync");
+  });
+
+  it('defaults to "sync" on unexpected output', async () => {
+    mockSpawnResult(
+      "Well, I think this task is something that could be done quickly but also might take a while...",
+    );
+
+    const promise = spawner.triage("Do something", "sonnet");
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe("sync");
+  });
+
+  it('defaults to "sync" on spawn error', async () => {
+    const child = createMockChild();
+    mockedSpawn.mockReturnValue(child as any);
+
+    const promise = spawner.triage("Some task", "sonnet");
+
+    process.nextTick(() => {
+      child.emit("error", new Error("ENOENT: claude not found"));
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe("sync");
+  });
+
+  it("trims and lowercases response before matching", async () => {
+    mockSpawnResult("  Async  \n");
+
+    const promise = spawner.triage("Build a full REST API", "sonnet");
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe("async");
+  });
+});
+
 // ── Tests — parseStreamOutput ─────────────────────────────────────────────
 
 describe("parseStreamOutput", () => {

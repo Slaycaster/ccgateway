@@ -31,6 +31,65 @@ export interface SpawnOptions {
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 
 export class CCSpawner {
+  private static readonly TRIAGE_TIMEOUT_MS = 15_000;
+  private static readonly TRIAGE_PROMPT = `Given this user request, will it require intensive coding work (multiple file edits, building features, refactoring, debugging across files) or is it a quick task (answering questions, small edits, short explanations)?
+
+Respond with ONLY the single word "async" or "sync". Nothing else.
+
+User request:`;
+
+  /**
+   * Run a quick `claude --print` with Sonnet to classify a message as
+   * "sync" (quick task) or "async" (intensive, long-running).
+   *
+   * Defaults to "sync" on timeout, unexpected output, or errors.
+   */
+  async triage(message: string, _model: string): Promise<"sync" | "async"> {
+    const triageModel = "sonnet";
+    const args = [
+      "--print",
+      "--dangerously-skip-permissions",
+      "-p",
+      `${CCSpawner.TRIAGE_PROMPT} ${message}`,
+      "--model",
+      triageModel,
+      "--bare",
+    ];
+
+    return new Promise<"sync" | "async">((resolve) => {
+      const child = spawn("claude", args, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let timedOut = false;
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+      }, CCSpawner.TRIAGE_TIMEOUT_MS);
+
+      child.on("close", () => {
+        clearTimeout(timer);
+        if (timedOut) {
+          resolve("sync");
+          return;
+        }
+        const trimmed = stdout.trim().toLowerCase();
+        resolve(trimmed === "async" ? "async" : "sync");
+      });
+
+      child.on("error", () => {
+        clearTimeout(timer);
+        resolve("sync");
+      });
+    });
+  }
+
   /**
    * Spawn a `claude --print` invocation.
    *
