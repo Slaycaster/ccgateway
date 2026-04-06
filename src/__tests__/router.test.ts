@@ -463,7 +463,7 @@ describe("route — async path", () => {
         channel: "123456",
       }),
     );
-    expect(result).toContain("[async]");
+    expect(result).toContain("background");
     expect(result).toContain("ccg-salt-a3f2");
   });
 
@@ -503,7 +503,7 @@ describe("route — async path", () => {
     expect(appendCalls).toHaveLength(2); // user + async placeholder
     const assistantMsg = appendCalls[1][2];
     expect(assistantMsg.role).toBe("assistant");
-    expect(assistantMsg.content).toContain("[async]");
+    expect(assistantMsg.content).toContain("background");
   });
 
   it("skips triage when no watcher is configured", async () => {

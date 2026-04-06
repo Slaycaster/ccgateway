@@ -110,17 +110,35 @@ export class MessageRouter {
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
     // 5.5 Triage: should this run async?
-    //     Skip triage for image messages — they require stream-json (sync only)
-    //     and the triage call adds unnecessary latency.
-    const mode =
-      this.watcher && images.length === 0
-        ? await this.spawner.triage(messageContent, agent.model)
-        : ("sync" as const);
+    const mode = this.watcher
+      ? await this.spawner.triage(messageContent, agent.model)
+      : ("sync" as const);
 
     if (mode === "async") {
+      // For async tasks with images: save images to temp files in the
+      // workspace so Claude Code can read them via the Read tool.
+      let asyncMessage = messageContent;
+      let asyncAttachDir: string | undefined;
+
+      if (images.length > 0) {
+        const dir = join(agent.workspace, `.ccg-attachments-${Date.now()}`);
+        await mkdir(dir, { recursive: true });
+        asyncAttachDir = dir;
+
+        const paths: string[] = [];
+        for (let i = 0; i < images.length; i++) {
+          const ext = images[i].mediaType.split("/")[1] || "png";
+          const filePath = join(dir, `image-${i}.${ext}`);
+          await writeFile(filePath, Buffer.from(images[i].base64, "base64"));
+          paths.push(filePath);
+        }
+        const fileList = paths.map((p) => `  - ${p}`).join("\n");
+        asyncMessage += `\n\n[Attached images — use the Read tool to view them]\n${fileList}`;
+      }
+
       const { sessionName, taskDir } = await this.spawner.spawnAsync({
         workspace: agent.workspace,
-        message: messageContent,
+        message: asyncMessage,
         systemPrompt,
         model: agent.model,
         ccgHome: getCcgHome(),
@@ -141,7 +159,7 @@ export class MessageRouter {
         startedAt: Date.now(),
       });
 
-      const placeholder = `[async] Task dispatched to tmux session \`${sessionName}\`. I'll post the result here when done.`;
+      const placeholder = `On it — working on this in the background. I'll get back to you when it's done. (tmux: \`${sessionName}\`)`;
       await this.sessions.appendMessage(agentId, sessionKey, {
         role: "assistant",
         content: placeholder,
