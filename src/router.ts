@@ -110,9 +110,12 @@ export class MessageRouter {
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
     // 5.5 Triage: should this run async?
-    const mode = this.watcher
-      ? await this.spawner.triage(messageContent, agent.model)
-      : ("sync" as const);
+    //     Skip triage for image messages — they require stream-json (sync only)
+    //     and the triage call adds unnecessary latency.
+    const mode =
+      this.watcher && images.length === 0
+        ? await this.spawner.triage(messageContent, agent.model)
+        : ("sync" as const);
 
     if (mode === "async") {
       const { sessionName, taskDir } = await this.spawner.spawnAsync({

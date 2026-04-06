@@ -46,6 +46,7 @@ export interface SpawnOptions {
 // ── CCSpawner ──────────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
+const IMAGE_TIMEOUT_MS = 600_000; // 10 minutes — vision calls on Opus are slower
 
 export class CCSpawner {
   private static readonly TRIAGE_TIMEOUT_MS = 15_000;
@@ -264,7 +265,7 @@ User request:`;
       systemPrompt,
       model,
       images = [],
-      timeoutMs = DEFAULT_TIMEOUT_MS,
+      timeoutMs = IMAGE_TIMEOUT_MS,
     } = options;
 
     const args = [
