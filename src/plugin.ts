@@ -54,7 +54,7 @@ export interface CcgPlugin {
 }
 
 /** A module's default export must be a factory that returns a CcgPlugin. */
-export type PluginFactory = () => CcgPlugin;
+export type PluginFactory = (config?: unknown) => CcgPlugin;
 
 // ── Plugin loader ──────────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ export class PluginLoader {
         );
       }
 
-      const plugin = mod.default();
+      const plugin = mod.default(entry.config);
       await plugin.init(core);
       this.plugins.push(plugin);
       logger.info(

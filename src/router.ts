@@ -169,7 +169,13 @@ export class MessageRouter {
     const systemPrompt = await this.context.build(agentId, sessionKey);
 
     // 7. Triage: sync or async?
-    if (this.watcher) {
+    // Skip async triage for non-interactive gateways (bitbucket, jira) —
+    // tmux interactive mode requires a trusted workspace prompt which
+    // cannot be answered in headless mode. Use sync + long timeout instead.
+    const interactiveGateways = new Set(["slack", "discord"]);
+    const allowAsync = interactiveGateways.has(message.from.gateway);
+
+    if (this.watcher && allowAsync) {
       const triageResult = await this.spawner.triage(messageContent);
 
       if (triageResult === "async") {
