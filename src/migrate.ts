@@ -1,8 +1,9 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { glob } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { saveConfig, ensureDirectories, getCcgHome } from './config.js';
 import type { CcgConfig, AgentConfig, BindingConfig, HeartbeatConfig, PluginEntry } from './config.js';
 
@@ -805,4 +806,56 @@ export async function initNew(): Promise<void> {
   console.log('  ccg agents list     — see your agents');
   console.log('  ccg chat <agent>    — start a chat');
   console.log('  ccg start           — start the daemon');
+}
+
+// ── Claude Code skill install/uninstall ────────────────────────────────────
+
+/**
+ * Resolve the Claude Code config directory.
+ * Uses CLAUDE_CONFIG_DIR env var if set, otherwise defaults to ~/.claude.
+ */
+function getClaudeConfigDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+}
+
+/**
+ * Resolve the source path for the SKILL.md file shipped with ccgateway.
+ * Works from both src/ (dev) and dist/ (installed).
+ */
+function getSkillSourcePath(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  // Both src/ and dist/ are one level below package root
+  return join(__dirname, '..', 'skills', 'talk', 'SKILL.md');
+}
+
+/**
+ * Install the ccgateway /talk skill into Claude Code's skills directory.
+ * Copies skills/talk/SKILL.md → ~/.claude/skills/ccgateway-talk/SKILL.md
+ */
+export async function installCcgSkill(): Promise<void> {
+  const source = getSkillSourcePath();
+
+  if (!existsSync(source)) {
+    throw new Error(`Skill source not found: ${source}`);
+  }
+
+  const claudeHome = getClaudeConfigDir();
+  const targetDir = join(claudeHome, 'skills', 'ccgateway-talk');
+  const targetFile = join(targetDir, 'SKILL.md');
+
+  await mkdir(targetDir, { recursive: true });
+  await copyFile(source, targetFile);
+}
+
+/**
+ * Remove the ccgateway /talk skill from Claude Code's skills directory.
+ */
+export async function uninstallCcgSkill(): Promise<void> {
+  const claudeHome = getClaudeConfigDir();
+  const targetDir = join(claudeHome, 'skills', 'ccgateway-talk');
+
+  if (existsSync(targetDir)) {
+    await rm(targetDir, { recursive: true, force: true });
+  }
 }

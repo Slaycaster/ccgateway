@@ -10,6 +10,8 @@ import {
   slackTokenEnvVars,
   deriveInstanceName,
   resolveCollisions,
+  installCcgSkill,
+  uninstallCcgSkill,
 } from "../migrate.js";
 import type { AgentConfig } from "../config.js";
 
@@ -1016,5 +1018,66 @@ describe("multi-instance migration", () => {
     expect(config.heartbeats).toHaveLength(1);
     expect(config.heartbeats[0].agent).toBe("agent1");
     expect(config.heartbeats[0].cron).toBe("0 9 * * *");
+  });
+});
+
+// ── Skill install/uninstall ──────────────────────────────────────────────────
+
+describe("installCcgSkill", () => {
+  it("copies SKILL.md to ~/.claude/skills/ccgateway-talk/", async () => {
+    const fakeClaudeHome = join(tempDir, ".claude");
+    process.env.CLAUDE_CONFIG_DIR = fakeClaudeHome;
+
+    await installCcgSkill();
+
+    const skillPath = join(fakeClaudeHome, "skills", "ccgateway-talk", "SKILL.md");
+    expect(existsSync(skillPath)).toBe(true);
+
+    const content = await readFile(skillPath, "utf-8");
+    expect(content).toContain("name: talk");
+    expect(content).toContain("ccgateway");
+
+    delete process.env.CLAUDE_CONFIG_DIR;
+  });
+
+  it("overwrites existing skill file on reinstall", async () => {
+    const fakeClaudeHome = join(tempDir, ".claude");
+    process.env.CLAUDE_CONFIG_DIR = fakeClaudeHome;
+
+    // Install twice — should not throw
+    await installCcgSkill();
+    await installCcgSkill();
+
+    const skillPath = join(fakeClaudeHome, "skills", "ccgateway-talk", "SKILL.md");
+    expect(existsSync(skillPath)).toBe(true);
+
+    delete process.env.CLAUDE_CONFIG_DIR;
+  });
+});
+
+describe("uninstallCcgSkill", () => {
+  it("removes the ccgateway-talk skill directory", async () => {
+    const fakeClaudeHome = join(tempDir, ".claude");
+    process.env.CLAUDE_CONFIG_DIR = fakeClaudeHome;
+
+    // Install first
+    await installCcgSkill();
+    const skillDir = join(fakeClaudeHome, "skills", "ccgateway-talk");
+    expect(existsSync(skillDir)).toBe(true);
+
+    // Uninstall
+    await uninstallCcgSkill();
+    expect(existsSync(skillDir)).toBe(false);
+
+    delete process.env.CLAUDE_CONFIG_DIR;
+  });
+
+  it("does not throw when skill directory does not exist", async () => {
+    const fakeClaudeHome = join(tempDir, ".claude");
+    process.env.CLAUDE_CONFIG_DIR = fakeClaudeHome;
+
+    await expect(uninstallCcgSkill()).resolves.not.toThrow();
+
+    delete process.env.CLAUDE_CONFIG_DIR;
   });
 });
