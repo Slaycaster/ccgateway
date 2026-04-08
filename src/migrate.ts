@@ -439,6 +439,15 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
   }
 
   console.log(`Config written to: ${join(home, 'config.json')}`);
+
+  // Install Claude Code /talk skill
+  try {
+    await installCcgSkill();
+    console.log('Claude Code /talk skill installed.');
+  } catch {
+    console.log('Note: Could not install Claude Code /talk skill (run `ccg install-skill` manually).');
+  }
+
   console.log();
   console.log('To start ccgateway, load the .env first:');
   console.log(`  source ${join(home, '.env')} && ccg start`);
@@ -802,6 +811,15 @@ export async function initNew(): Promise<void> {
 
   console.log(`\nccgateway initialized at: ${process.env.CCG_HOME || join(homedir(), '.ccgateway')}`);
   console.log(`Agent "${agentId}" created with workspace: ${workspace}`);
+
+  // Install Claude Code /talk skill
+  try {
+    await installCcgSkill();
+    console.log('Claude Code /talk skill installed.');
+  } catch {
+    console.log('Note: Could not install Claude Code /talk skill (run `ccg install-skill` manually).');
+  }
+
   console.log('\nNext steps:');
   console.log('  ccg agents list     — see your agents');
   console.log('  ccg chat <agent>    — start a chat');
