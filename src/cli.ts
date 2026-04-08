@@ -17,7 +17,7 @@ import { HeartbeatManager } from "./heartbeat.js";
 import { CrossAgentMessenger } from "./messaging.js";
 import { PluginLoader } from "./plugin.js";
 import { startDaemon, stopDaemon, getDaemonStatus } from "./daemon.js";
-import { migrateFromOpenClaw, initNew } from "./migrate.js";
+import { migrateFromOpenClaw, initNew, installCcgSkill, uninstallCcgSkill } from "./migrate.js";
 import { installService, uninstallService } from "./systemd.js";
 
 // ── Read version from package.json ──────────────────────────────────────────
@@ -659,6 +659,34 @@ skillsCmd
     }
 
     console.log(`Skill "${name}" removed.`);
+  });
+
+// ── install-skill / uninstall-skill ────────────────────────────────────────
+
+program
+  .command("install-skill")
+  .description("Install the /talk skill into Claude Code (~/.claude/skills/)")
+  .action(async () => {
+    try {
+      await installCcgSkill();
+      console.log("Claude Code /talk skill installed to ~/.claude/skills/ccgateway-talk/");
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("uninstall-skill")
+  .description("Remove the /talk skill from Claude Code")
+  .action(async () => {
+    try {
+      await uninstallCcgSkill();
+      console.log("Claude Code /talk skill removed.");
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
   });
 
 // ── Run ─────────────────────────────────────────────────────────────────────
