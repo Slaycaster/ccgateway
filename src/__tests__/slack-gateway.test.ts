@@ -82,7 +82,6 @@ function stubCore(overrides: Partial<CcgCore> = {}): CcgCore {
       agents: [],
       bindings: [],
       plugins: [],
-      heartbeats: [],
     } as CcgConfig,
     agents: {
       getAgent: vi.fn((id: string) =>

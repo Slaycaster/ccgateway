@@ -10,7 +10,7 @@ import type { CcgConfig } from "../config.js";
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function makeConfig(agents: CcgConfig["agents"] = []): CcgConfig {
-  return { agents, bindings: [], plugins: [], heartbeats: [] };
+  return { agents, bindings: [], plugins: [] };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

@@ -16,7 +16,6 @@ function stubCore(config?: Partial<CcgConfig>): CcgCore {
       agents: [],
       bindings: [],
       plugins: [],
-      heartbeats: [],
       ...config,
     },
     agents: {
@@ -90,7 +89,6 @@ describe("PluginLoader", () => {
       agents: [],
       bindings: [],
       plugins: [{ name: "test-gw", enabled: true, config: {} }],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);
@@ -110,7 +108,6 @@ describe("PluginLoader", () => {
       agents: [],
       bindings: [],
       plugins: [{ name: "disabled-one", enabled: false, config: {} }],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);
@@ -138,7 +135,6 @@ describe("PluginLoader", () => {
         { name: "review", enabled: true, config: {} },
         { name: "bash", enabled: true, config: {} },
       ],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);
@@ -165,7 +161,6 @@ describe("PluginLoader", () => {
         { name: "a", enabled: true, config: {} },
         { name: "b", enabled: true, config: {} },
       ],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);
@@ -202,7 +197,6 @@ describe("PluginLoader", () => {
         { name: "second", enabled: true, config: {} },
         { name: "third", enabled: true, config: {} },
       ],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);
@@ -234,7 +228,6 @@ describe("PluginLoader", () => {
       agents: [],
       bindings: [],
       plugins: [{ name: "lifecycle", enabled: true, config: {} }],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);
@@ -252,7 +245,6 @@ describe("PluginLoader", () => {
       agents: [],
       bindings: [],
       plugins: [{ name: "nonexistent", enabled: true, config: {} }],
-      heartbeats: [],
     };
 
     await expect(loader.loadPlugins(config, core)).rejects.toThrow(
@@ -270,7 +262,6 @@ describe("PluginLoader", () => {
       agents: [],
       bindings: [],
       plugins: [{ name: "bad-export", enabled: true, config: {} }],
-      heartbeats: [],
     };
 
     await expect(loader.loadPlugins(config, core)).rejects.toThrow(
@@ -290,7 +281,6 @@ describe("PluginLoader", () => {
       agents: [],
       bindings: [],
       plugins: [{ name: "x", enabled: true, config: {} }],
-      heartbeats: [],
     };
 
     await loader.loadPlugins(config, core);

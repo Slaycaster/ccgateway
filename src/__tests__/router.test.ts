@@ -314,7 +314,7 @@ describe("route — error handling", () => {
     expect(spawner.spawn).not.toHaveBeenCalled();
   });
 
-  it("handles spawner failure: appends error to session and throws", async () => {
+  it("handles spawner failure: throws without persisting error to session", async () => {
     (spawner.spawn as ReturnType<typeof vi.fn>).mockResolvedValue({
       response: "Something went wrong",
       exitCode: 1,
@@ -327,14 +327,10 @@ describe("route — error handling", () => {
       "Something went wrong",
     );
 
-    // Should still have appended 2 messages: user + error
+    // Should only have appended the user message (error is NOT persisted)
     const appendCalls = (sessions.appendMessage as ReturnType<typeof vi.fn>).mock.calls;
-    expect(appendCalls).toHaveLength(2);
-
-    const errorMsg = appendCalls[1][2];
-    expect(errorMsg.role).toBe("assistant");
-    expect(errorMsg.content).toContain("[error]");
-    expect(errorMsg.content).toContain("Something went wrong");
+    expect(appendCalls).toHaveLength(1);
+    expect(appendCalls[0][2].role).toBe("user");
   });
 
   it("handles timeout (exit code 124) with friendly error message", async () => {
@@ -350,10 +346,10 @@ describe("route — error handling", () => {
       "timed out",
     );
 
+    // Error is NOT persisted to session — only the user message
     const appendCalls = (sessions.appendMessage as ReturnType<typeof vi.fn>).mock.calls;
-    const errorMsg = appendCalls[1][2];
-    expect(errorMsg.content).toContain("[error]");
-    expect(errorMsg.content).toContain("timed out");
+    expect(appendCalls).toHaveLength(1);
+    expect(appendCalls[0][2].role).toBe("user");
   });
 });
 

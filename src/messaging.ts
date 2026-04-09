@@ -61,6 +61,21 @@ export class CrossAgentMessenger {
       throw new Error(`Agent "${toAgentId}" not found`);
     }
 
+    // Enforce messaging policy — check if sender is allowed to message this target
+    if (fromAgentId) {
+      const senderAgent = this.agents.getAgent(fromAgentId);
+      if (senderAgent?.messagingPolicy?.allowedTargets) {
+        const allowed = senderAgent.messagingPolicy.allowedTargets;
+        if (!allowed.includes(toAgentId)) {
+          throw new Error(
+            `Agent "${fromAgentId}" is not allowed to message "${toAgentId}". ` +
+            `Allowed targets: ${allowed.join(", ") || "none"}. ` +
+            `Post updates in your own channel instead — Den reads all channels.`,
+          );
+        }
+      }
+    }
+
     // 1. Find target agent's primary binding (first binding where agent matches)
     const binding = this.bindings.find((b) => b.agent === toAgentId);
 

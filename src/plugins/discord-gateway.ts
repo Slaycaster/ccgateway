@@ -132,7 +132,13 @@ export default function createDiscordGateway(
 
   // Message deduplication — Discord gateway can replay events after reconnection.
   // Track recently seen message IDs to prevent processing the same message twice.
-  const seenMessages = new Set<string>();
+  // Uses a Map<string, number> (key → timestamp) instead of a Set for better
+  // debuggability and to avoid any edge-case with Set identity checks.
+  const seenMessages = new Map<string, number>();
+
+  // Secondary dedup: tracks messages actively being processed (belt-and-suspenders).
+  // Prevents double-processing even if the primary dedup is somehow bypassed.
+  const activeProcessing = new Set<string>();
 
   // Cross-agent loop prevention — tracks channels where the last message we
   // processed was from a bot. If ANOTHER bot message arrives in the same channel
@@ -189,12 +195,21 @@ export default function createDiscordGateway(
           // Discord gateway can deliver the same event multiple times per bot.
           // Key includes botId so different bots can still process the same message.
           const dedupKey = `${botId}:${msg.id}`;
-          if (seenMessages.has(dedupKey)) return;
-          seenMessages.add(dedupKey);
+          if (seenMessages.has(dedupKey)) {
+            logger.info(
+              `discord-gateway: bot "${botId}" dedup caught duplicate ${msg.id} in channel ${msg.channelId}`,
+            );
+            return;
+          }
+          seenMessages.set(dedupKey, Date.now());
           if (seenMessages.size > 5000) {
-            const all = [...seenMessages];
+            // Keep the 2500 most recent entries
+            const entries = [...seenMessages.entries()]
+              .sort((a, b) => a[1] - b[1]);
             seenMessages.clear();
-            for (const id of all.slice(-2500)) seenMessages.add(id);
+            for (const [k, v] of entries.slice(-2500)) {
+              seenMessages.set(k, v);
+            }
           }
 
           try {
@@ -274,128 +289,142 @@ export default function createDiscordGateway(
   // ── Internal message handler ──────────────────────────────────────────
 
   async function handleMessage(msg: Message, receivingBotId: string): Promise<void> {
-    logger.info(
-      `discord-gateway: bot "${receivingBotId}" received message ${msg.id} in channel ${msg.channelId} from ${msg.author.tag} (bot=${msg.author.bot})`,
-    );
+    // Secondary dedup — guard against the primary dedup being bypassed
+    const activeKey = `${receivingBotId}:${msg.id}`;
+    if (activeProcessing.has(activeKey)) {
+      logger.info(
+        `discord-gateway: bot "${receivingBotId}" secondary dedup caught duplicate ${msg.id}`,
+      );
+      return;
+    }
+    activeProcessing.add(activeKey);
 
-    // Cross-agent communication: allow messages from our own bots, but
-    // prevent loops. External bots are always ignored.
-    if (msg.author.bot) {
-      // Ignore external bots entirely
-      if (!ownBotUserIds.has(msg.author.id)) return;
+    try {
+      logger.info(
+        `discord-gateway: bot "${receivingBotId}" received message ${msg.id} in channel ${msg.channelId} from ${msg.author.tag} (bot=${msg.author.bot})`,
+      );
 
-      // Ignore self — a bot never responds to its own messages
-      const client = clients.get(receivingBotId);
-      if (client?.user?.id === msg.author.id) return;
+      // Cross-agent communication: allow messages from our own bots, but
+      // prevent loops. External bots are always ignored.
+      if (msg.author.bot) {
+        // Ignore external bots entirely
+        if (!ownBotUserIds.has(msg.author.id)) return;
 
-      // Loop prevention: only allow 1 hop of bot-to-bot per channel.
-      // If we already responded to a bot message here, skip until a human resets.
-      const chainKey = `${receivingBotId}:${msg.channelId}`;
-      if (botChainActive.has(chainKey)) {
+        // Ignore self — a bot never responds to its own messages
+        const client = clients.get(receivingBotId);
+        if (client?.user?.id === msg.author.id) return;
+
+        // Loop prevention: only allow 1 hop of bot-to-bot per channel.
+        // If we already responded to a bot message here, skip until a human resets.
+        const chainKey = `${receivingBotId}:${msg.channelId}`;
+        if (botChainActive.has(chainKey)) {
+          logger.info(
+            `discord-gateway: bot "${receivingBotId}" skipping bot message in ${msg.channelId} (chain limit)`,
+          );
+          return;
+        }
+
+        // Mark chain active — next bot message in this channel will be skipped
+        botChainActive.add(chainKey);
+      } else {
+        // Human message resets the chain for all bots in this channel
+        for (const botId of clients.keys()) {
+          botChainActive.delete(`${botId}:${msg.channelId}`);
+        }
+      }
+
+      // Only handle messages if THIS bot is the one bound to this channel.
+      // This prevents "several people typing" — only the correct bot responds.
+      const binding = core.config.bindings.find(
+        (b) => b.gateway === "discord" && b.channel === msg.channelId && b.bot === receivingBotId,
+      );
+      if (!binding) {
         logger.info(
-          `discord-gateway: bot "${receivingBotId}" skipping bot message in ${msg.channelId} (chain limit)`,
+          `discord-gateway: bot "${receivingBotId}" no binding for channel ${msg.channelId}`,
+        );
+        return; // this bot is not bound to this channel
+      }
+      const agentId = binding.agent;
+
+      // Check if user is in allowedUsers
+      if (!pluginConfig.allowedUsers.includes(msg.author.id)) {
+        return;
+      }
+
+      // Handle slash commands
+      const trimmed = msg.content.trim().toLowerCase();
+      if (trimmed === "/new" || trimmed === "/reset") {
+        const sessionKey = await core.sessions.getOrCreateSession(
+          agentId,
+          "discord",
+          msg.channelId,
+        );
+        await (core.sessions as any).resetSession(agentId, sessionKey);
+        await (msg.channel as TextChannel).send(
+          `Session reset for **${agentId}**. Starting fresh.`,
         );
         return;
       }
 
-      // Mark chain active — next bot message in this channel will be skipped
-      botChainActive.add(chainKey);
-    } else {
-      // Human message resets the chain for all bots in this channel
-      for (const botId of clients.keys()) {
-        botChainActive.delete(`${botId}:${msg.channelId}`);
+      if (trimmed === "/status") {
+        const sessionKey = await core.sessions.getOrCreateSession(
+          agentId,
+          "discord",
+          msg.channelId,
+        );
+        await (msg.channel as TextChannel).send(
+          `**Agent:** ${agentId}\n**Session:** \`${sessionKey}\`\n**Channel:** ${msg.channelId}`,
+        );
+        return;
       }
-    }
 
-    // Only handle messages if THIS bot is the one bound to this channel.
-    // This prevents "several people typing" — only the correct bot responds.
-    const binding = core.config.bindings.find(
-      (b) => b.gateway === "discord" && b.channel === msg.channelId && b.bot === receivingBotId,
-    );
-    if (!binding) {
-      logger.info(
-        `discord-gateway: bot "${receivingBotId}" no binding for channel ${msg.channelId}`,
-      );
-      return; // this bot is not bound to this channel
-    }
-    const agentId = binding.agent;
+      // Normalize to IncomingMessage and route
+      const incomingMessage = normalizeMessage(msg, agentId);
 
-    // Check if user is in allowedUsers
-    if (!pluginConfig.allowedUsers.includes(msg.author.id)) {
-      return;
-    }
+      // Show typing indicator while processing
+      const typingInterval = setInterval(() => {
+        (msg.channel as TextChannel).sendTyping().catch(() => {});
+      }, 5000);
+      await (msg.channel as TextChannel).sendTyping().catch(() => {});
 
-    // Handle slash commands
-    const trimmed = msg.content.trim().toLowerCase();
-    if (trimmed === "/new" || trimmed === "/reset") {
-      const sessionKey = await core.sessions.getOrCreateSession(
-        agentId,
-        "discord",
-        msg.channelId,
-      );
-      await (core.sessions as any).resetSession(agentId, sessionKey);
-      await (msg.channel as TextChannel).send(
-        `Session reset for **${agentId}**. Starting fresh.`,
-      );
-      return;
-    }
+      // Send initial "thinking" message that we'll edit with streaming content
+      const sentMsg = await (msg.channel as TextChannel).send("Thinking...");
+      let lastEditTime = 0;
 
-    if (trimmed === "/status") {
-      const sessionKey = await core.sessions.getOrCreateSession(
-        agentId,
-        "discord",
-        msg.channelId,
-      );
-      await (msg.channel as TextChannel).send(
-        `**Agent:** ${agentId}\n**Session:** \`${sessionKey}\`\n**Channel:** ${msg.channelId}`,
-      );
-      return;
-    }
+      // Throttled streaming callback — edits the message at most every EDIT_THROTTLE_MS
+      const onChunk = (accumulated: string) => {
+        const now = Date.now();
+        if (now - lastEditTime < EDIT_THROTTLE_MS) return;
+        lastEditTime = now;
 
-    // Normalize to IncomingMessage and route
-    const incomingMessage = normalizeMessage(msg, agentId);
+        // During streaming, show first chunk (truncated if too long)
+        const preview =
+          accumulated.length > DISCORD_CHAR_LIMIT - 3
+            ? accumulated.slice(0, DISCORD_CHAR_LIMIT - 3) + "..."
+            : accumulated;
 
-    // Show typing indicator while processing
-    const typingInterval = setInterval(() => {
-      (msg.channel as TextChannel).sendTyping().catch(() => {});
-    }, 5000);
-    await (msg.channel as TextChannel).sendTyping().catch(() => {});
+        sentMsg.edit(preview).catch(() => {});
+      };
 
-    // Send initial "thinking" message that we'll edit with streaming content
-    const sentMsg = await (msg.channel as TextChannel).send("Thinking...");
-    let lastEditTime = 0;
+      try {
+        const response = await core.router.route(incomingMessage, onChunk);
 
-    // Throttled streaming callback — edits the message at most every EDIT_THROTTLE_MS
-    const onChunk = (accumulated: string) => {
-      const now = Date.now();
-      if (now - lastEditTime < EDIT_THROTTLE_MS) return;
-      lastEditTime = now;
+        // Final response: replace initial message + send overflow chunks
+        const chunks = splitMessage(response);
+        await sentMsg.edit(chunks[0]);
+        for (let i = 1; i < chunks.length; i++) {
+          await (msg.channel as TextChannel).send(chunks[i]);
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger.error(`discord-gateway: error handling message: ${errMsg}`);
 
-      // During streaming, show first chunk (truncated if too long)
-      const preview =
-        accumulated.length > DISCORD_CHAR_LIMIT - 3
-          ? accumulated.slice(0, DISCORD_CHAR_LIMIT - 3) + "..."
-          : accumulated;
-
-      sentMsg.edit(preview).catch(() => {});
-    };
-
-    try {
-      const response = await core.router.route(incomingMessage, onChunk);
-
-      // Final response: replace initial message + send overflow chunks
-      const chunks = splitMessage(response);
-      await sentMsg.edit(chunks[0]);
-      for (let i = 1; i < chunks.length; i++) {
-        await (msg.channel as TextChannel).send(chunks[i]);
+        await sentMsg.edit(`⚠️ Error: ${errMsg}`).catch(() => {});
+      } finally {
+        clearInterval(typingInterval);
       }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      logger.error(`discord-gateway: error handling message: ${errMsg}`);
-
-      await sentMsg.edit(`⚠️ Error: ${errMsg}`).catch(() => {});
     } finally {
-      clearInterval(typingInterval);
+      activeProcessing.delete(activeKey);
     }
   }
 }

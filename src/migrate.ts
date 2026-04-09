@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { glob } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { saveConfig, ensureDirectories, getCcgHome } from './config.js';
-import type { CcgConfig, AgentConfig, BindingConfig, HeartbeatConfig, PluginEntry } from './config.js';
+import type { CcgConfig, AgentConfig, BindingConfig, PluginEntry } from './config.js';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -47,20 +47,6 @@ interface OpenClawBinding {
       id: string;
     };
   };
-}
-
-interface OpenClawCronJob {
-  id: string;
-  agentId: string;
-  name: string;
-  enabled: boolean;
-  schedule: {
-    kind: string;
-    expr?: string;
-    tz?: string;
-    at?: string;
-  };
-  [key: string]: unknown;
 }
 
 interface SlackAccountConfig {
@@ -257,11 +243,10 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
   // 5. Flatten all agents
   const allAgents: AgentConfig[] = instanceAgents.flatMap(ia => ia.agents);
 
-  // 6. Extract bindings, tokens, heartbeats from each instance (using resolved IDs)
+  // 6. Extract bindings and tokens from each instance (using resolved IDs)
   const allBindings: BindingConfig[] = [];
   const allEnvLines: string[] = [];
   const allInstructions: string[] = [];
-  const allHeartbeats: HeartbeatConfig[] = [];
   const allSlackBots: Record<string, { token: string; appToken: string }> = {};
   const allDiscordBots: Record<string, { token: string }> = {};
   const bindingSeen = new Set<string>();
@@ -319,10 +304,6 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
       allAllowedUsers.add(u);
     }
 
-    // Heartbeats
-    const cronPath = join(dirname(instance.configPath), 'cron', 'jobs.json');
-    const heartbeats = await extractHeartbeats(cronPath, renameForInstance);
-    allHeartbeats.push(...heartbeats);
   }
 
   // 7. Build plugin entries
@@ -359,7 +340,6 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
     agents: allAgents,
     bindings: allBindings,
     plugins,
-    heartbeats: allHeartbeats,
   };
 
   // 9. Print summary
@@ -368,7 +348,6 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
   console.log(`  Agents:     ${allAgents.length}`);
   console.log(`  Bindings:   ${allBindings.length}`);
   console.log(`  Plugins:    ${plugins.length}`);
-  console.log(`  Heartbeats: ${allHeartbeats.length}`);
   console.log();
 
   if (renameSummary.length > 0) {
@@ -399,14 +378,6 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
     console.log('Plugins:');
     for (const p of plugins) {
       console.log(`  ${p.name} (${p.enabled ? 'enabled' : 'disabled'})`);
-    }
-    console.log();
-  }
-
-  if (allHeartbeats.length > 0) {
-    console.log('Heartbeats:');
-    for (const h of allHeartbeats) {
-      console.log(`  ${h.agent}: ${h.cron} (${h.tz})`);
     }
     console.log();
   }
@@ -735,30 +706,6 @@ function extractAllowedUsers(config: OpenClawConfig): string[] {
   return [...users];
 }
 
-async function extractHeartbeats(
-  cronPath: string,
-  renameId: (id: string) => string,
-): Promise<HeartbeatConfig[]> {
-  if (!existsSync(cronPath)) return [];
-
-  try {
-    const raw = await readFile(cronPath, 'utf-8');
-    const data = JSON.parse(raw) as { jobs?: OpenClawCronJob[] };
-    const jobs = data.jobs;
-    if (!jobs || jobs.length === 0) return [];
-
-    return jobs
-      .filter((job) => job.enabled && job.schedule.kind === 'cron' && job.schedule.expr)
-      .map((job): HeartbeatConfig => ({
-        agent: renameId(job.agentId),
-        cron: job.schedule.expr!,
-        tz: job.schedule.tz || 'UTC',
-      }));
-  } catch {
-    return [];
-  }
-}
-
 // ── Init ────────────────────────────────────────────────────────────────────
 
 /**
@@ -803,7 +750,6 @@ export async function initNew(): Promise<void> {
     ],
     bindings: [],
     plugins: [],
-    heartbeats: [],
   };
 
   await ensureDirectories();

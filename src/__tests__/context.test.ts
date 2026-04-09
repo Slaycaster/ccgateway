@@ -337,7 +337,6 @@ describe("build — agent roster", () => {
       ],
       bindings: [],
       plugins: [],
-      heartbeats: [],
     };
     const registry = new AgentRegistry(config);
     const builderWithAgents = new ContextBuilder(sessions, skills, tempDir, registry);
@@ -363,7 +362,6 @@ describe("build — agent roster", () => {
       ],
       bindings: [],
       plugins: [],
-      heartbeats: [],
     };
     const registry = new AgentRegistry(config);
     const builderWithAgents = new ContextBuilder(sessions, skills, tempDir, registry);

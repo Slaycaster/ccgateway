@@ -245,19 +245,15 @@ export class MessageRouter {
       rm(attachmentDir, { recursive: true, force: true }).catch(() => {});
     }
 
-    // 10. Handle failure: append error to session and throw
+    // 10. Handle failure: throw without persisting errors to session history.
+    // Error responses pollute conversation context and waste tokens on
+    // subsequent requests — the user already sees the error in Discord/Slack.
     if (result.exitCode !== 0) {
       const isTimeout = result.exitCode === 124;
       const stderrHint = result.stderr ? `\n\nDetails: ${result.stderr.slice(0, 500)}` : "";
       const errorContent = isTimeout
         ? "The task timed out — no activity was detected for over 15 minutes. Try breaking it into smaller steps."
         : (result.response || `Spawner failed with exit code ${result.exitCode}`) + stderrHint;
-      await this.sessions.appendMessage(agentId, sessionKey, {
-        role: "assistant",
-        content: `[error] ${errorContent}`,
-        ts: Date.now(),
-        tokens: result.tokensEstimate,
-      });
       throw new Error(errorContent);
     }
 

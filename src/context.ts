@@ -161,17 +161,30 @@ export class ContextBuilder {
   private buildRosterSection(agentId: string): string | null {
     if (!this.agents) return null;
 
+    const currentAgent = this.agents.getAgent(agentId);
     const allAgents = this.agents.listAgents();
     const others = allAgents.filter((a) => a.id !== agentId);
 
     if (others.length === 0) return null;
 
+    // Check if this agent has a messaging policy with restricted targets
+    const allowedTargets = currentAgent?.messagingPolicy?.allowedTargets;
+
     const lines = ["--- Agent Roster ---"];
     lines.push("Other agents you can communicate with:");
     for (const a of others) {
-      lines.push(`  - ${a.emoji ? a.emoji + " " : ""}${a.name} (id: ${a.id})`);
+      const canMessage = !allowedTargets || allowedTargets.includes(a.id);
+      const suffix = canMessage ? "" : " (messaging restricted)";
+      lines.push(`  - ${a.emoji ? a.emoji + " " : ""}${a.name} (id: ${a.id})${suffix}`);
     }
     lines.push("");
+
+    if (allowedTargets) {
+      lines.push(`⚠️ Your messaging is restricted. You may only send messages to: ${allowedTargets.join(", ") || "nobody"}.`);
+      lines.push("Post status updates, RCAs, and progress reports in YOUR OWN channel — Den reads all channels.");
+      lines.push("");
+    }
+
     lines.push("To send a message to another agent:");
     lines.push('  ccg send <agent-id> "your message" --from ' + agentId);
     lines.push("");

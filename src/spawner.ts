@@ -59,6 +59,31 @@ const INACTIVITY_TIMEOUT_MS = 900_000; // 15 minutes of silence
 /** Absolute safety cap so processes can't run forever. */
 const MAX_ABSOLUTE_TIMEOUT_MS = 1_800_000; // 30 minutes
 
+/**
+ * Build a clean environment for spawned `claude` child processes.
+ * Strips inherited Claude Code env vars (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT,
+ * CLAUDE_CODE_EXECPATH, CLAUDE_CODE_HIDE_ACCOUNT_INFO) so the child process
+ * doesn't think it's a nested Claude Code session, which can cause different
+ * rate-limit handling or feature restrictions.
+ */
+function cleanEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  // Strip Claude Code nesting indicators
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  delete env.CLAUDE_CODE_EXECPATH;
+  delete env.CLAUDE_CODE_HIDE_ACCOUNT_INFO;
+  // Strip npm/node env vars inherited from `npx tsx` that may confuse
+  // the child `claude` process into thinking it's part of an npm script
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("npm_")) delete env[key];
+  }
+  delete env.INIT_CWD;
+  delete env.COLOR;
+  delete env.NODE;
+  return env;
+}
+
 export class CCSpawner {
   private _muxBinary: string | null | undefined = undefined; // undefined = not detected yet
 
@@ -269,6 +294,7 @@ export class CCSpawner {
     const args = [
       "--print",
       "--dangerously-skip-permissions",
+      "--no-session-persistence",
       "--output-format",
       "stream-json",
       "--verbose",
@@ -285,9 +311,12 @@ export class CCSpawner {
       args.push("-p", message);
     }
 
+    const env = cleanEnv();
+
     return new Promise<SpawnResult>((resolve) => {
       const child = spawn("claude", args, {
         cwd: workspace,
+        env,
         stdio: [hasImages ? "pipe" : "ignore", "pipe", "pipe"],
       });
 
@@ -396,6 +425,7 @@ export class CCSpawner {
 
         const exitCode = timedOut ? 124 : (code ?? 1);
         const response = finalResult || accumulated || "";
+
         const inputChars = message.length + systemPrompt.length;
         const outputChars = response.length;
 
@@ -452,6 +482,7 @@ export class CCSpawner {
     return new Promise<SpawnResult>((resolve) => {
       const child = spawn("claude", args, {
         cwd: workspace,
+        env: cleanEnv(),
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -565,6 +596,7 @@ export class CCSpawner {
     return new Promise<SpawnResult>((resolve) => {
       const child = spawn("claude", args, {
         cwd: workspace,
+        env: cleanEnv(),
         stdio: ["pipe", "pipe", "pipe"],
       });
 

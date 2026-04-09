@@ -13,7 +13,6 @@ import { SkillManager } from "./skills.js";
 import { ContextBuilder } from "./context.js";
 import { CCSpawner } from "./spawner.js";
 import { startChat } from "./chat.js";
-import { HeartbeatManager } from "./heartbeat.js";
 import { CrossAgentMessenger } from "./messaging.js";
 import { PluginLoader } from "./plugin.js";
 import { startDaemon, stopDaemon, getDaemonStatus } from "./daemon.js";
@@ -219,105 +218,6 @@ program
 
     try {
       await startChat(agentId, registry, sessions, context, spawner);
-    } catch (err) {
-      console.error(`Error: ${(err as Error).message}`);
-      process.exitCode = 1;
-    }
-  });
-
-// ── heartbeat subcommand ─────────────────────────────────────────────────
-
-const heartbeatCmd = program
-  .command("heartbeat")
-  .description("Manage heartbeat schedules");
-
-heartbeatCmd
-  .command("install")
-  .description("Install cron jobs for heartbeats")
-  .action(async () => {
-    const config = await loadConfig();
-    const registry = new AgentRegistry(config);
-    const spawner = new CCSpawner();
-    const manager = new HeartbeatManager(registry, spawner, config.heartbeats);
-
-    try {
-      const lines = manager.installCron();
-      console.log("Installed heartbeat cron jobs:");
-      console.log(lines);
-    } catch (err) {
-      console.error(`Error: ${(err as Error).message}`);
-      process.exitCode = 1;
-    }
-  });
-
-heartbeatCmd
-  .command("uninstall")
-  .description("Remove heartbeat cron jobs")
-  .action(async () => {
-    const config = await loadConfig();
-    const registry = new AgentRegistry(config);
-    const spawner = new CCSpawner();
-    const manager = new HeartbeatManager(registry, spawner, config.heartbeats);
-
-    try {
-      manager.uninstallCron();
-      console.log("Heartbeat cron jobs removed.");
-    } catch (err) {
-      console.error(`Error: ${(err as Error).message}`);
-      process.exitCode = 1;
-    }
-  });
-
-heartbeatCmd
-  .command("list")
-  .description("List configured heartbeats")
-  .action(async () => {
-    const config = await loadConfig();
-    const registry = new AgentRegistry(config);
-    const spawner = new CCSpawner();
-    const manager = new HeartbeatManager(registry, spawner, config.heartbeats);
-    const heartbeats = manager.listHeartbeats();
-
-    if (heartbeats.length === 0) {
-      console.log("No heartbeats configured.");
-      return;
-    }
-
-    const header = ["Agent", "Cron", "Timezone"];
-    const rows = heartbeats.map((hb) => [hb.agent, hb.cron, hb.tz]);
-
-    const widths = header.map((h, i) =>
-      Math.max(h.length, ...rows.map((r) => r[i].length)),
-    );
-
-    const formatRow = (cols: string[]) =>
-      cols.map((c, i) => c.padEnd(widths[i])).join("  ");
-
-    console.log(formatRow(header));
-    console.log(widths.map((w) => "-".repeat(w)).join("  "));
-    for (const row of rows) {
-      console.log(formatRow(row));
-    }
-  });
-
-heartbeatCmd
-  .command("run <agent>")
-  .description("Run heartbeat for an agent manually")
-  .action(async (agentId: string) => {
-    const config = await loadConfig();
-    const registry = new AgentRegistry(config);
-    const spawner = new CCSpawner();
-    const manager = new HeartbeatManager(registry, spawner, config.heartbeats);
-
-    try {
-      const result = await manager.runHeartbeat(agentId);
-
-      if (result.silent) {
-        console.log(`Heartbeat for "${agentId}": all clear.`);
-      } else {
-        console.log(`Heartbeat for "${agentId}":`);
-        console.log(result.response);
-      }
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
       process.exitCode = 1;

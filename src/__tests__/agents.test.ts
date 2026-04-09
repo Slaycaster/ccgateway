@@ -26,7 +26,6 @@ function makeConfig(agents: AgentConfig[] = []): CcgConfig {
     agents,
     bindings: [],
     plugins: [],
-    heartbeats: [],
   };
 }
 

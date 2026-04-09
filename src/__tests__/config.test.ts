@@ -49,7 +49,6 @@ describe("loadConfig", () => {
       agents: [],
       bindings: [],
       plugins: [],
-      heartbeats: [],
     });
   });
 
@@ -82,13 +81,6 @@ describe("loadConfig", () => {
           config: { backend: "sqlite" },
         },
       ],
-      heartbeats: [
-        {
-          agent: "test-agent",
-          cron: "0 9 * * *",
-          tz: "America/New_York",
-        },
-      ],
     };
 
     await writeFile(
@@ -112,7 +104,6 @@ describe("loadConfig", () => {
     const loaded = await loadConfig();
     expect(loaded.bindings).toEqual([]);
     expect(loaded.plugins).toEqual([]);
-    expect(loaded.heartbeats).toEqual([]);
   });
 });
 
@@ -124,7 +115,6 @@ describe("saveConfig", () => {
       plugins: [
         { name: "test-plugin", enabled: false, config: {} },
       ],
-      heartbeats: [],
     };
 
     await saveConfig(config);
@@ -142,7 +132,6 @@ describe("saveConfig", () => {
       agents: [],
       bindings: [],
       plugins: [],
-      heartbeats: [],
     });
 
     expect(existsSync(join(nested, "config.json"))).toBe(true);

@@ -240,7 +240,7 @@ describe("discord-gateway plugin init", () => {
 
   function makeMockCore(): CcgCore {
     return {
-      config: { agents: [], bindings: [], plugins: [], heartbeats: [] },
+      config: { agents: [], bindings: [], plugins: [] },
       agents: {
         getAgent: vi.fn(),
         listAgents: vi.fn(() => []),

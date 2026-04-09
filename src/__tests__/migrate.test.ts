@@ -112,73 +112,15 @@ function mockOpenClawConfig() {
   };
 }
 
-function mockCronJobs() {
-  return {
-    version: 1,
-    jobs: [
-      {
-        id: "hb-1",
-        agentId: "main",
-        name: "ginger-heartbeat",
-        enabled: true,
-        schedule: {
-          kind: "cron",
-          expr: "0 9,13,17 * * *",
-          tz: "Asia/Manila",
-        },
-      },
-      {
-        id: "hb-2",
-        agentId: "salt",
-        name: "salt-heartbeat",
-        enabled: true,
-        schedule: {
-          kind: "cron",
-          expr: "0 9,13,17 * * *",
-          tz: "Asia/Manila",
-        },
-      },
-      {
-        id: "hb-3",
-        agentId: "pepper",
-        name: "pepper-heartbeat",
-        enabled: false,
-        schedule: {
-          kind: "cron",
-          expr: "0 10 * * *",
-          tz: "Asia/Manila",
-        },
-      },
-      {
-        id: "at-1",
-        agentId: "main",
-        name: "one-shot-reminder",
-        enabled: true,
-        schedule: {
-          kind: "at",
-          at: "2026-02-05T02:00:00.000Z",
-        },
-      },
-    ],
-  };
-}
-
 /** Write a single mock openclaw instance and return its config path. */
 async function writeMockFiles(
   ocConfig?: unknown,
-  cronJobs?: unknown,
 ): Promise<string> {
   const openclawDir = join(tempDir, "openclaw");
   await mkdir(openclawDir, { recursive: true });
 
   const configPath = join(openclawDir, "openclaw.json");
   await writeFile(configPath, JSON.stringify(ocConfig ?? mockOpenClawConfig()), "utf-8");
-
-  if (cronJobs !== undefined) {
-    const cronDir = join(openclawDir, "cron");
-    await mkdir(cronDir, { recursive: true });
-    await writeFile(join(cronDir, "jobs.json"), JSON.stringify(cronJobs), "utf-8");
-  }
 
   return configPath;
 }
@@ -190,7 +132,6 @@ async function writeMockFiles(
 async function writeNamedInstance(
   name: string,
   ocConfig: unknown,
-  cronJobs?: unknown,
 ): Promise<string> {
   const dirName = name === "openclaw" ? ".openclaw" : `.openclaw-${name}`;
   const dir = join(tempDir, dirName);
@@ -198,12 +139,6 @@ async function writeNamedInstance(
 
   const configPath = join(dir, "openclaw.json");
   await writeFile(configPath, JSON.stringify(ocConfig), "utf-8");
-
-  if (cronJobs !== undefined) {
-    const cronDir = join(dir, "cron");
-    await mkdir(cronDir, { recursive: true });
-    await writeFile(join(cronDir, "jobs.json"), JSON.stringify(cronJobs), "utf-8");
-  }
 
   return configPath;
 }
@@ -378,7 +313,7 @@ describe("migrateFromOpenClaw", () => {
   });
 
   it("writes config file with correct agents on non-dry-run", async () => {
-    const configPath = await writeMockFiles(mockOpenClawConfig(), mockCronJobs());
+    const configPath = await writeMockFiles(mockOpenClawConfig());
     await migrateFromOpenClaw({ configPaths: [configPath] });
 
     const ccgConfigPath = join(ccgHome, "config.json");
@@ -411,7 +346,7 @@ describe("migrateFromOpenClaw", () => {
   });
 
   it("extracts bindings correctly", async () => {
-    const configPath = await writeMockFiles(mockOpenClawConfig(), mockCronJobs());
+    const configPath = await writeMockFiles(mockOpenClawConfig());
     await migrateFromOpenClaw({ configPaths: [configPath] });
 
     const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
@@ -430,40 +365,12 @@ describe("migrateFromOpenClaw", () => {
     expect(mainBinding.bot).toBe("ginger");
   });
 
-  it("extracts heartbeats from cron jobs (enabled cron-type only)", async () => {
-    const configPath = await writeMockFiles(mockOpenClawConfig(), mockCronJobs());
-    await migrateFromOpenClaw({ configPaths: [configPath] });
-
-    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
-    const config = JSON.parse(raw);
-
-    expect(config.heartbeats).toHaveLength(2);
-
-    const mainHb = config.heartbeats.find((h: { agent: string }) => h.agent === "main");
-    expect(mainHb).toBeDefined();
-    expect(mainHb.cron).toBe("0 9,13,17 * * *");
-    expect(mainHb.tz).toBe("Asia/Manila");
-
-    const saltHb = config.heartbeats.find((h: { agent: string }) => h.agent === "salt");
-    expect(saltHb).toBeDefined();
-  });
-
   it("dry run does not write files", async () => {
     const configPath = await writeMockFiles();
     await migrateFromOpenClaw({ configPaths: [configPath], dryRun: true });
 
     const ccgConfigPath = join(ccgHome, "config.json");
     expect(existsSync(ccgConfigPath)).toBe(false);
-  });
-
-  it("handles missing cron/jobs.json gracefully", async () => {
-    const configPath = await writeMockFiles(mockOpenClawConfig());
-    await migrateFromOpenClaw({ configPaths: [configPath] });
-
-    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
-    const config = JSON.parse(raw);
-
-    expect(config.heartbeats).toEqual([]);
   });
 
   it("model name stripping works for various formats", async () => {
@@ -826,44 +733,6 @@ describe("multi-instance migration", () => {
     expect(config.agents.find((a: { id: string }) => a.id === "vilma")).toBeDefined();
   });
 
-  it("heartbeat agent IDs use post-collision-resolution names", async () => {
-    const instance1 = {
-      agents: {
-        list: [{ id: "main", identity: { name: "Ginger" } }],
-      },
-    };
-
-    const instance2 = {
-      agents: {
-        list: [{ id: "main", identity: { name: "Sentri" } }],
-      },
-    };
-
-    const cronJobs = {
-      jobs: [
-        {
-          id: "hb-1",
-          agentId: "main",
-          name: "heartbeat",
-          enabled: true,
-          schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" },
-        },
-      ],
-    };
-
-    const path1 = await writeNamedInstance("openclaw", instance1, cronJobs);
-    const path2 = await writeNamedInstance("sentri", instance2, cronJobs);
-
-    await migrateFromOpenClaw({ configPaths: [path1, path2] });
-
-    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
-    const config = JSON.parse(raw);
-
-    expect(config.heartbeats).toHaveLength(2);
-    const agents = config.heartbeats.map((h: { agent: string }) => h.agent).sort();
-    expect(agents).toEqual(["openclaw-main", "sentri-main"]);
-  });
-
   it("bindings use post-collision-resolution agent IDs", async () => {
     const instance1 = {
       agents: {
@@ -985,40 +854,6 @@ describe("multi-instance migration", () => {
     expect(discordBindings).toHaveLength(1);
   });
 
-  it("skips kind:every interval jobs silently", async () => {
-    const ocConfig = {
-      agents: { list: [{ id: "agent1" }] },
-    };
-
-    const cronJobs = {
-      jobs: [
-        {
-          id: "cron-1",
-          agentId: "agent1",
-          name: "cron-job",
-          enabled: true,
-          schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" },
-        },
-        {
-          id: "every-1",
-          agentId: "agent1",
-          name: "every-job",
-          enabled: true,
-          schedule: { kind: "every", expr: "30m" },
-        },
-      ],
-    };
-
-    const path = await writeNamedInstance("openclaw", ocConfig, cronJobs);
-    await migrateFromOpenClaw({ configPaths: [path] });
-
-    const raw = await readFile(join(ccgHome, "config.json"), "utf-8");
-    const config = JSON.parse(raw);
-
-    expect(config.heartbeats).toHaveLength(1);
-    expect(config.heartbeats[0].agent).toBe("agent1");
-    expect(config.heartbeats[0].cron).toBe("0 9 * * *");
-  });
 });
 
 // ── Skill install/uninstall ──────────────────────────────────────────────────

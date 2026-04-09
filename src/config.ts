@@ -5,6 +5,11 @@ import { homedir } from "node:os";
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
+export interface MessagingPolicy {
+  /** Agent IDs this agent is allowed to message. If omitted, no restrictions. */
+  allowedTargets?: string[];
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
@@ -15,6 +20,7 @@ export interface AgentConfig {
   allowedTools: string[];
   maxConcurrentSessions: number;
   timeoutMs?: number;
+  messagingPolicy?: MessagingPolicy;
 }
 
 export interface BindingConfig {
@@ -30,17 +36,10 @@ export interface PluginEntry {
   config: Record<string, unknown>;
 }
 
-export interface HeartbeatConfig {
-  agent: string;
-  cron: string;
-  tz: string;
-}
-
 export interface CcgConfig {
   agents: AgentConfig[];
   bindings: BindingConfig[];
   plugins: PluginEntry[];
-  heartbeats: HeartbeatConfig[];
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -49,7 +48,6 @@ const DEFAULT_CONFIG: CcgConfig = {
   agents: [],
   bindings: [],
   plugins: [],
-  heartbeats: [],
 };
 
 /**
@@ -87,7 +85,6 @@ export async function loadConfig(): Promise<CcgConfig> {
     agents: parsed.agents ?? [],
     bindings: parsed.bindings ?? [],
     plugins: parsed.plugins ?? [],
-    heartbeats: parsed.heartbeats ?? [],
   };
 }
 

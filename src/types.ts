@@ -6,7 +6,6 @@ export type {
   AgentConfig,
   BindingConfig,
   PluginEntry,
-  HeartbeatConfig,
 } from "./config.js";
 
 // ── Message types ──────────────────────────────────────────────────────────
