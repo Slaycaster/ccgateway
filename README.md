@@ -2,220 +2,74 @@
   <img src="assets/logo.jpg" alt="ccgateway logo" width="600" />
 </p>
 
-# ccgateway - Multi-agent orchestration for Claude Code
+# ccgateway
 
-**Multi-agent orchestration for Claude Code CLI.**
+**An orchestration agent for Claude Code.**
 
-You have a Claude Code subscription. You want multiple AI agents with their own identities, Discord/Slack channels, persistent conversations, and cross-agent messaging. ccgateway does that by calling `claude --print` under the hood — no API keys, no third-party harness, just your subscription.
+ccgateway is a single Node.js process that orchestrates multiple Claude Code agents — routing messages between Discord, Slack, and the CLI, assembling context per turn, spawning long-running tasks into tmux, and letting agents talk to each other. No API keys, no third-party harness, no persistent agent processes. Just `claude --print` invoked with the right context, in the right workspace, at the right moment.
+
+## Why orchestration?
+
+Claude Code is stateless — great at one turn at a time in one directory. ccgateway is the layer above it: it decides *which* agent should answer, *where* that agent lives, *what* context it needs, and *how* to fan work out across async tasks and other agents.
+
+- **Route** — Discord/Slack/CLI messages → the right agent based on channel bindings
+- **Assemble** — Identity files + conversation history + skills + memory → one `--append-system-prompt` payload
+- **Persist** — JSONL sessions per agent-per-channel, never expire, context-windowed automatically
+- **Spawn** — Long-running work dispatched to detached tmux sessions you can attach to live
+- **Coordinate** — Agents message each other through their own channels, with their own avatars
+- **Extend** — Gateways are plugins; implement one interface to add Telegram, WhatsApp, or anything else
+
+Every AI invocation is a fresh `claude --print`. No memory leaks, trivial crash recovery, and you can change models per turn. Concurrency is bounded only by your Claude Code subscription.
 
 ## Quick Start
 
 ```bash
-# Install
 npm install -g ccgateway
-
-# New setup
 ccg init
 
-# Or migrate from OpenClaw
-ccg migrate openclaw
-
-# Add your bot tokens to ~/.ccgateway/.env
+# Add bot tokens to ~/.ccgateway/.env
 # DISCORD_SALT_TOKEN=...
 # SLACK_PEPPER_TOKEN=...
 
-# Start as a background service (systemd)
-ccg install
-
-# Or run in foreground
-source ~/.ccgateway/.env && ccg start
+ccg install                                   # systemd user service (recommended)
+# or
+source ~/.ccgateway/.env && ccg start         # foreground
 ```
 
-### Service Management
+See [Installation](docs/getting-started/installation.md) and [Quick Start](docs/getting-started/quick-start.md) for the full walkthrough.
+
+### Service management
 
 ```bash
-ccg install                # Install and start as systemd user service
-ccg uninstall              # Stop and remove the service
+ccg install                         # install + start as systemd user service
+ccg uninstall                       # stop + remove
 
-# Standard systemd commands also work:
 systemctl --user status  ccgateway
 systemctl --user restart ccgateway
 journalctl --user -u ccgateway -f
 ```
 
-`ccg install` creates a systemd user service that auto-starts on boot, restarts on failure, and sources `~/.ccgateway/.env` for bot tokens. Run `loginctl enable-linger $USER` to keep it running after you log out.
+`loginctl enable-linger $USER` keeps the service alive after logout.
 
-## Why ccgateway over OpenClaw?
-
-If you're coming from OpenClaw, you already know what multi-agent orchestration looks like. Same agent identities, same Discord channels, same memory files, same workflows. ccgateway gives you all of that running legitimately on Claude Code CLI. If you're using different models other than Claude, then you're better off using OpenClaw.
-
-One command migrates your existing setup:
-
-```bash
-ccg migrate openclaw
-```
-
-Your agents, channel bindings, bot tokens, heartbeat schedules, and skills carry over. Workspaces and memory files stay exactly where they are. Start the gateway and your agents are back online.
-
-### How is this different?
-
-ccgateway doesn't proxy, wrap, or intercept Claude Code sessions. Every agent invocation is a direct call to `claude --print` — the same CLI binary you run in your terminal, using your Claude Code subscription. ccgateway just manages the plumbing: who talks where, what context gets injected, and where conversation history lives.
-
-## Comparison
-
-| Feature | OpenClaw | ccgateway |
-|---|---|---|
-| Anthropic will hunt you? | No | **Yes** |
-| Uses CC subscription (no API billing) | No | **Yes** |
-| Multi-agent identities | Yes | Yes |
-| Discord gateway | Yes | Yes |
-| Slack gateway | Yes | Yes |
-| Session persistence | Yes | Yes |
-| Cross-agent messaging | Yes | Yes |
-| Memory system | Yes | Yes |
-| Skills system | Yes | Yes |
-| Heartbeats / cron | Yes | Yes |
-| Telegram / WhatsApp | Yes | Roadmap |
-| Browser Tools | Yes | Roadmap |
-| Migration from OpenClaw | — | **One command** |
-
-## Features
-
-### Multi-Agent Identities
-
-Each agent has its own workspace directory with personality, instructions, and memory. ccgateway points Claude Code at the right workspace — identity comes from your files, not from ccgateway.
-
-```bash
-ccg agents add --id salt --name Salt --workspace ~/clawd-salt --model claude-opus-4-6 --emoji "🧂"
-ccg agents list
-```
-
-Agents read their identity from `CLAUDE.md`, `SOUL.md`, `IDENTITY.md`, and `AGENTS.md` in their workspace. Use whatever combination works for you.
-
-
-## Migration from OpenClaw
-
-```bash
-# Preview what gets imported
-ccg migrate openclaw --dry-run
-
-# Run the migration
-ccg migrate openclaw
-```
-
-### What gets migrated
-
-- **Agents** — IDs, names, emojis, workspaces, model preferences
-- **Channel bindings** — All Discord channel-to-agent mappings (from both `bindings[]` and guild channel configs)
-- **Bot tokens** — Written to `~/.ccgateway/.env` with actual values from your OpenClaw config
-- **Heartbeats** — Cron schedules converted from OpenClaw's job format
-- **Discord gateway plugin** — Auto-configured with your bots, guild, and allowed users
-
-### What stays as-is
-
-- Agent workspaces (`CLAUDE.md`, `SOUL.md`, `MEMORY.md`, `memory/`) — untouched
-- Git repositories, worktrees, project files — untouched
-- Consolidation of `AGENTS.md` + `SOUL.md` + `IDENTITY.md` into `CLAUDE.md` is optional — ccgateway reads all of them
-
-
-### Discord & Slack Gateways
-
-Each agent can have its own Discord bot (with its own avatar and name) bound to specific channels. Slack works the same way with socket mode — no public URL needed.
-
-```json
-{
-  "bindings": [
-    { "agent": "salt", "gateway": "discord", "channel": "1465736400014938230", "bot": "salt" },
-    { "agent": "pepper", "gateway": "slack", "channel": "C07ABC123", "bot": "pepper" }
-  ]
-}
-```
-
-Slash commands in chat: `/new` resets the session, `/reset` does the same, `/status` shows session info.
-
-### Session Persistence
-
-Conversations are stored as JSONL files — one per agent per channel. Sessions never expire. When the context window fills up (default 200k tokens), older messages drop from what gets sent to Claude, but the full history stays on disk.
-
-```bash
-ccg sessions list
-ccg sessions inspect salt:discord:1465736400014938230
-ccg sessions reset salt:discord:1465736400014938230
-```
-
-### Cross-Agent Messaging
-
-Agents talk to each other by posting to each other's Discord/Slack channels. Salt's bot posts in Pepper's channel with Salt's avatar — the gateway picks it up and routes it to Pepper like any other message.
-
-```bash
-ccg send pepper "RCA done for NHD-10763" --from salt
-```
-
-Agents without gateway bindings fall back to a file-based inbox.
-
-### Skills System
-
-Skills are markdown files with instructions that agents can read and follow. Shared skills are available to all agents. Agent-specific skills override shared ones.
-
-```bash
-ccg skills list
-ccg skills add deploy-to-staging.md
-ccg skills add navix-rca.md --agent salt
-```
-
-Agents can also create skills from chat — they just write a `.md` file to the skills directory.
-
-### Memory
-
-Memory lives in agent workspaces as plain markdown files. ccgateway injects today's and yesterday's daily logs into each turn so agents have recent context without file reads.
-
-```
-~/clawd-salt/
-├── CLAUDE.md          # Identity + rules (loaded by CC automatically)
-├── MEMORY.md          # Curated long-term memory
-└── memory/
-    ├── 2026-04-05.md  # Today's log
-    └── 2026-04-04.md  # Yesterday's log
-```
-
-### Heartbeats
-
-Minimal cron-based agent wakeups. If `HEARTBEAT.md` exists in the workspace, the agent reads it and acts. If nothing needs attention, the response is silently discarded — no tokens wasted on Discord.
-
-```bash
-ccg heartbeat install    # Write to system crontab
-ccg heartbeat run salt   # Manual trigger
-```
-
-### CLI Chat
-
-Test agents locally without Discord or Slack:
-
-```bash
-ccg chat main
-```
-
-Same session management, same context building, same agent identity — just in your terminal.
-
-## How It Works
+## How it works
 
 ```
 ┌──────────────────────────────────────────────┐
-│              ccgateway (single process)       │
+│            ccgateway (single process)        │
 │                                              │
-│  ┌─────────┐  ┌─────────┐  ┌─────────────┐  │
-│  │ Discord │  │  Slack  │  │  Future     │  │
-│  │ Plugin  │  │ Plugin  │  │  Plugins    │  │
-│  └────┬────┘  └────┬────┘  └──────┬──────┘  │
+│  ┌─────────┐  ┌─────────┐  ┌─────────────┐   │
+│  │ Discord │  │  Slack  │  │   Future    │   │
+│  │ Plugin  │  │ Plugin  │  │   Plugins   │   │
+│  └────┬────┘  └────┬────┘  └──────┬──────┘   │
 │       └────────────┼──────────────┘          │
 │                    ↓                         │
 │            ┌──────────────┐                  │
-│            │   Router     │                  │
+│            │    Router    │                  │
 │            │  (bindings)  │                  │
 │            └──────┬───────┘                  │
 │                   ↓                          │
 │           ┌───────────────┐                  │
-│           │ Session Mgr   │                  │
+│           │  Session Mgr  │                  │
 │           │ (JSONL state) │                  │
 │           └───────┬───────┘                  │
 │                   ↓                          │
@@ -231,15 +85,92 @@ Same session management, same context building, same agent identity — just in 
 └──────────────────────────────────────────────┘
 ```
 
-Every agent invocation is stateless. ccgateway assembles the full context — identity files, conversation history, skill index, memory — and passes it to `claude --print` via `--append-system-prompt`. Claude Code reads `CLAUDE.md` from the workspace automatically. The response gets appended to the session JSONL and routed back to Discord/Slack.
+For each turn: a plugin receives a message → router matches channel to agent → session manager loads the JSONL → an optional Haiku triage call decides sync-vs-async → context builder assembles the system prompt → `claude --print` runs in the agent's workspace → response is appended to the session and posted back. Full lifecycle in [Architecture](docs/concepts/architecture.md).
 
-No persistent processes per agent. No session hijacking. No API keys. Just `claude --print` with the right context, in the right directory.
+## Capabilities
 
-### Both systems can run side by side during transition.
+### Multi-agent identities
 
-## Plugin Architecture
+Each agent is a workspace directory with its own identity files. ccgateway points Claude Code at the right workspace — identity lives in your files, not in ccgateway config.
 
-Gateway channels are plugins. Discord and Slack ship as built-ins. Adding a new gateway means implementing one interface:
+```bash
+ccg agents add --id salt --name Salt --workspace ~/clawd-salt --model claude-opus-4-6 --emoji "🧂"
+ccg agents list
+```
+
+Claude Code reads `CLAUDE.md` automatically. ccgateway also injects `SOUL.md`, `IDENTITY.md`, `AGENTS.md`, plus today's and yesterday's daily logs. More in [Agents](docs/concepts/agents.md).
+
+### Discord & Slack gateways
+
+Each agent can have its own Discord bot (avatar and name) bound to specific channels. Slack uses socket mode — no public URL needed.
+
+```json
+{
+  "bindings": [
+    { "agent": "salt",   "gateway": "discord", "channel": "1465736400014938230", "bot": "salt" },
+    { "agent": "pepper", "gateway": "slack",   "channel": "C07ABC123",          "bot": "pepper" }
+  ]
+}
+```
+
+In-channel slash commands: `/new`, `/reset`, `/status`. Gateway-specific setup in [Discord](docs/gateways/discord.md) and [Slack](docs/gateways/slack.md).
+
+### Session persistence
+
+One JSONL file per agent-per-channel. Sessions never expire. When history exceeds the token budget (default 200k), older messages drop from what gets sent to Claude, but the full log stays on disk.
+
+```bash
+ccg sessions list
+ccg sessions inspect salt:discord:1465736400014938230
+ccg sessions reset   salt:discord:1465736400014938230
+```
+
+### Async task spawning
+
+A Haiku triage classifies each incoming message as sync or async. Async work launches `claude` in interactive mode inside a detached tmux session with full tool access — you can attach live to watch or intervene. When the session ends, results are posted back to the channel.
+
+```bash
+tmux list-sessions
+tmux attach -t <task-session>
+```
+
+Details in [Async Tasks](docs/features/async-tasks.md).
+
+### Cross-agent messaging
+
+Agents coordinate by posting to each other's channels. Salt messaging Pepper looks identical to a human posting in Pepper's channel — same avatar, same routing.
+
+```bash
+ccg send pepper "RCA done for NHD-10763" --from salt
+```
+
+Agents without gateway bindings fall back to a file-based inbox. See [Cross-Agent Messaging](docs/features/cross-agent-messaging.md).
+
+### Skills
+
+Markdown files with agent-readable instructions. Shared skills available to everyone; agent-specific skills override shared ones.
+
+```bash
+ccg skills list
+ccg skills add deploy-to-staging.md
+ccg skills add navix-rca.md --agent salt
+```
+
+More in [Skills](docs/features/skills.md).
+
+### CLI chat
+
+Test agents locally without Discord or Slack — same session, same context, same identity:
+
+```bash
+ccg chat salt
+```
+
+Or drop into an orchestrated subagent session with full identity injection from inside Claude Code via the `/talk` skill.
+
+## Plugin architecture
+
+Gateways are plugins. Discord and Slack ship as built-ins. Add a new gateway by implementing one interface:
 
 ```typescript
 interface CcgPlugin {
@@ -251,30 +182,45 @@ interface CcgPlugin {
 }
 ```
 
-Skill plugins handle capabilities that can't be expressed in a markdown file (e.g., browser automation). Tool plugins expose shell commands agents can call.
+Full guide: [Building a Plugin](docs/guides/building-a-plugin.md).
+
+## Migration from OpenClaw
+
+```bash
+ccg migrate openclaw [--config <path>] [--dry-run]
+```
+
+Agents, bindings, tokens, and skills carry over. See [Migrating from OpenClaw](docs/guides/migrating-from-openclaw.md).
+
+## Configuration
+
+Config lives at `~/.ccgateway/config.json` (or `$CCG_HOME/config.json`). Reference: [config.md](docs/reference/config.md), [environment.md](docs/reference/environment.md), [troubleshooting.md](docs/reference/troubleshooting.md).
+
+```bash
+ccg agents list
+ccg sessions list
+ccg skills list
+ccg status
+```
 
 ## Roadmap
 
 - **Telegram gateway** — Plugin for Telegram bot API
 - **WhatsApp gateway** — Plugin for WhatsApp Business API
-- **Browser Tools** — Playwright-based browser interaction plugin
-- **Shared skill packs** — Pre-built skill collections (Obsidian integration, Apple Notes, deployment workflows)
-- **Token-accurate context budgeting** — Replace chars/4 estimation with proper tokenizer
+- **Browser tools** — Playwright-based browser interaction plugin
+- **Shared skill packs** — Pre-built skill collections
+- **Token-accurate context budgeting** — Replace chars/4 estimation with a real tokenizer
 
-## Configuration
+## Docs
 
-Config lives at `~/.ccgateway/config.json` (or `$CCG_HOME/config.json`).
+Full documentation under [`docs/`](docs/index.md):
 
-```bash
-ccg agents list              # Agents
-ccg sessions list            # Active sessions
-ccg skills list              # Available skills
-ccg status                   # Daemon status
-ccg install                  # Install as background service
-ccg uninstall                # Remove background service
-```
-
-See the [design spec](docs/superpowers/specs/2026-04-05-ccgateway-design.md) for the full configuration reference.
+- [Getting Started](docs/getting-started/installation.md)
+- [Concepts](docs/concepts/architecture.md) — architecture, agents, sessions, plugins, context
+- [Features](docs/features/async-tasks.md) — async tasks, cross-agent messaging, skills, memory, CLI chat
+- [Gateways](docs/gateways/discord.md) — Discord, Slack
+- [Guides](docs/guides/creating-an-agent.md) — creating agents, writing skills, building plugins, migration
+- [CLI Reference](docs/cli/reference.md)
 
 ## License
 
