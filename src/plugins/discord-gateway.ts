@@ -212,6 +212,16 @@ export default function createDiscordGateway(
             }
           }
 
+          // Early-intercept /stop so it doesn't queue behind the spawn
+          // the user is trying to cancel.
+          try {
+            if (await tryHandleStop(msg, botId)) return;
+          } catch (err) {
+            logger.error(
+              `discord-gateway: error handling /stop: ${(err as Error).message}`,
+            );
+          }
+
           try {
             await enqueueMessage(msg, botId);
           } catch (err) {
@@ -284,6 +294,46 @@ export default function createDiscordGateway(
     });
 
     return current;
+  }
+
+  // ── /stop interceptor ────────────────────────────────────────────────────
+  /**
+   * If `msg` is `/stop` from an authorized user on a channel bound to `botId`,
+   * cancel any in-flight sync/async work for that (agent, channel) and ack.
+   * Runs BEFORE the per-channel queue so it can interrupt the active spawn.
+   *
+   * Returns true when the message was handled (caller must not enqueue).
+   */
+  async function tryHandleStop(msg: Message, botId: string): Promise<boolean> {
+    // Only consider human messages
+    if (msg.author.bot) return false;
+    if (msg.content.trim().toLowerCase() !== "/stop") return false;
+
+    const binding = core.config.bindings.find(
+      (b) => b.gateway === "discord" && b.channel === msg.channelId && b.bot === botId,
+    );
+    if (!binding) return false;
+    if (!pluginConfig.allowedUsers.includes(msg.author.id)) return false;
+
+    const { syncCancelled, asyncCancelled } = await core.router.cancel(
+      binding.agent,
+      "discord",
+      msg.channelId,
+    );
+
+    const parts: string[] = [];
+    if (syncCancelled) parts.push("active prompt");
+    if (asyncCancelled > 0) parts.push(`${asyncCancelled} async task${asyncCancelled === 1 ? "" : "s"}`);
+    const reply = parts.length > 0
+      ? `🛑 Stopped: ${parts.join(" + ")}.`
+      : "Nothing to stop — no active work in this channel.";
+
+    try {
+      await (msg.channel as TextChannel).send(reply);
+    } catch (err) {
+      logger.warn(`discord-gateway: /stop ack failed: ${(err as Error).message}`);
+    }
+    return true;
   }
 
   // ── Internal message handler ──────────────────────────────────────────
@@ -363,6 +413,22 @@ export default function createDiscordGateway(
         await (msg.channel as TextChannel).send(
           `Session reset for **${agentId}**. Starting fresh.`,
         );
+        return;
+      }
+
+      if (trimmed === "/stop") {
+        const { syncCancelled, asyncCancelled } = await core.router.cancel(
+          agentId,
+          "discord",
+          msg.channelId,
+        );
+        const parts: string[] = [];
+        if (syncCancelled) parts.push("active prompt");
+        if (asyncCancelled > 0) parts.push(`${asyncCancelled} async task${asyncCancelled === 1 ? "" : "s"}`);
+        const reply = parts.length > 0
+          ? `🛑 Stopped: ${parts.join(" + ")}.`
+          : "Nothing to stop — no active work in this channel.";
+        await (msg.channel as TextChannel).send(reply);
         return;
       }
 

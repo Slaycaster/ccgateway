@@ -29,6 +29,11 @@ export interface MessageRouter {
   route(message: IncomingMessage, onChunk?: (accumulated: string) => void): Promise<string>;
   resolveAgent(gateway: string, channelId: string): string | undefined;
   resolveAgentByBot(gateway: string, botId: string): string | undefined;
+  cancel(
+    agentId: string,
+    gateway: string,
+    channel: string,
+  ): Promise<{ syncCancelled: boolean; asyncCancelled: number }>;
 }
 
 // ── Core API exposed to plugins ────────────────────────────────────────────

@@ -317,7 +317,7 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
         bots: allDiscordBots,
         guild: guildId || '',
         allowedUsers: [...allAllowedUsers],
-        commands: ['/new', '/reset', '/status'],
+        commands: ['/new', '/reset', '/status', '/stop'],
       },
     });
   }
@@ -330,7 +330,7 @@ export async function migrateFromOpenClaw(options: MigrateOptions = {}): Promise
         bots: allSlackBots,
         workspace: '',
         allowedUsers: [...allAllowedUsers],
-        commands: ['/new', '/reset', '/status'],
+        commands: ['/new', '/reset', '/status', '/stop'],
       },
     });
   }

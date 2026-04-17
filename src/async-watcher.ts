@@ -78,6 +78,47 @@ export class AsyncTaskWatcher {
     return [...this.tasks];
   }
 
+  /**
+   * Cancel any async task(s) registered for the given (agent, gateway, channel).
+   * Kills the tmux/screen session and removes the task(s) from monitoring.
+   * Returns the number of tasks cancelled.
+   */
+  async cancelForChannel(
+    agentId: string,
+    gateway: string,
+    channel: string,
+  ): Promise<number> {
+    let cancelled = 0;
+    for (let i = this.tasks.length - 1; i >= 0; i--) {
+      const task = this.tasks[i];
+      if (
+        task.agentId === agentId &&
+        task.gateway === gateway &&
+        task.channel === channel
+      ) {
+        this.tasks.splice(i, 1);
+        try {
+          await this.spawner.killSession(task.sessionName);
+        } catch (err) {
+          logger.warn(
+            `async-watcher: failed to kill session ${task.sessionName}: ${(err as Error).message}`,
+          );
+        }
+        try {
+          const { rm } = await import("node:fs/promises");
+          await rm(task.taskDir, { recursive: true, force: true });
+        } catch {
+          // non-fatal
+        }
+        cancelled++;
+        logger.info(
+          `async-watcher: cancelled task ${task.sessionName} for ${agentId}@${gateway}:${channel}`,
+        );
+      }
+    }
+    return cancelled;
+  }
+
   // ── Polling ──────────────────────────────────────────────────────────────
 
   private async poll(): Promise<void> {

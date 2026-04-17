@@ -226,12 +226,14 @@ export class MessageRouter {
     }
 
     // 8. Spawn claude (sync path)
+    const spawnKey = `${agentId}:${message.from.gateway}:${message.from.channel}`;
     const spawnOptions = {
       workspace: agent.workspace,
       message: messageContent,
       systemPrompt,
       model: agent.model,
       allowedTools: agent.allowedTools,
+      spawnKey,
       ...(agent.timeoutMs ? { timeoutMs: agent.timeoutMs } : {}),
       ...(images.length > 0 ? { images } : {}),
     };
@@ -267,6 +269,43 @@ export class MessageRouter {
 
     // 12. Return response text (guard against empty responses)
     return result.response.trim() || "(no response)";
+  }
+
+  /**
+   * Cancel any in-flight work (sync spawn and/or async tmux task) for a given
+   * (agent, gateway, channel). Used by the `/stop` slash command.
+   *
+   * Returns a summary describing what was cancelled.
+   */
+  async cancel(
+    agentId: string,
+    gateway: string,
+    channel: string,
+  ): Promise<{ syncCancelled: boolean; asyncCancelled: number }> {
+    const spawnKey = `${agentId}:${gateway}:${channel}`;
+    const syncCancelled = this.spawner.cancel(spawnKey);
+
+    let asyncCancelled = 0;
+    if (this.watcher) {
+      asyncCancelled = await this.watcher.cancelForChannel(agentId, gateway, channel);
+    }
+
+    if (syncCancelled || asyncCancelled > 0) {
+      // Record the cancellation in session history so context stays accurate.
+      try {
+        const sessionKey = this.sessions.getOrCreateSession(agentId, gateway, channel);
+        await this.sessions.appendMessage(agentId, sessionKey, {
+          role: "assistant",
+          content: "[cancelled by /stop]",
+          ts: Date.now(),
+          tokens: { in: 0, out: 0 },
+        });
+      } catch (err) {
+        logger.warn(`router.cancel: failed to record cancellation: ${(err as Error).message}`);
+      }
+    }
+
+    return { syncCancelled, asyncCancelled };
   }
 
   /**

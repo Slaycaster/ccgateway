@@ -1,4 +1,4 @@
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -27,6 +27,8 @@ export interface SpawnOptions {
   /** When provided, switches to --input-format stream-json so images are
    *  sent as content blocks directly (no Read-tool round-trip). */
   images?: ImageInput[];
+  /** Optional key used to register the spawn for external cancellation via `cancel(key)`. */
+  spawnKey?: string;
 }
 
 export interface AsyncSpawnOptions {
@@ -86,6 +88,49 @@ function cleanEnv(): NodeJS.ProcessEnv {
 
 export class CCSpawner {
   private _muxBinary: string | null | undefined = undefined; // undefined = not detected yet
+
+  /** Active sync spawns keyed by `spawnKey` for external cancellation. */
+  private activeSpawns = new Map<string, ChildProcess>();
+
+  /**
+   * Cancel an in-flight sync spawn by its registered key.
+   * Sends SIGTERM, then SIGKILL after 2s if still alive.
+   * Returns true if a spawn was found and killed.
+   */
+  cancel(key: string): boolean {
+    const child = this.activeSpawns.get(key);
+    if (!child) return false;
+
+    try {
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        if (!child.killed) {
+          try { child.kill("SIGKILL"); } catch { /* ignore */ }
+        }
+      }, 2000);
+    } catch {
+      // ignore
+    }
+    this.activeSpawns.delete(key);
+    return true;
+  }
+
+  /** Check if a spawn key currently has an active process. */
+  isActive(key: string): boolean {
+    return this.activeSpawns.has(key);
+  }
+
+  private registerSpawn(key: string | undefined, child: ChildProcess): void {
+    if (!key) return;
+    this.activeSpawns.set(key, child);
+  }
+
+  private unregisterSpawn(key: string | undefined, child: ChildProcess): void {
+    if (!key) return;
+    if (this.activeSpawns.get(key) === child) {
+      this.activeSpawns.delete(key);
+    }
+  }
 
   // ── Triage ───────────────────────────────────────────────────────────────
 
@@ -158,12 +203,11 @@ export class CCSpawner {
     const instructionsFile = join(taskDir, "INSTRUCTIONS.md");
 
     if (mux === "tmux") {
-      // Launch tmux session with claude in interactive mode
+      // Launch tmux session with claude in interactive mode (no pipe — preserves TTY)
       const tmuxCmd = [
         `claude --dangerously-skip-permissions`,
         `--append-system-prompt-file ${instructionsFile}`,
         `--model ${model}`,
-        `2>&1 | tee ${outputLog}`,
       ].join(" ");
 
       await execAsync("tmux", [
@@ -171,6 +215,12 @@ export class CCSpawner {
         "-s", sessionName,
         "-c", workspace,
         tmuxCmd,
+      ]);
+
+      // Pipe output to log file while preserving TTY
+      await execAsync("tmux", [
+        "pipe-pane", "-t", sessionName,
+        `cat >> ${outputLog}`,
       ]);
 
       // Wait for claude to initialize, then send the prompt + Enter
@@ -181,17 +231,17 @@ export class CCSpawner {
       await execAsync("tmux", ["paste-buffer", "-b", "ccg-prompt", "-d", "-t", sessionName]);
       await execAsync("tmux", ["send-keys", "-t", sessionName, "Enter"]);
     } else {
-      // screen fallback
+      // screen fallback (no pipe — preserves TTY)
       const screenCmd = [
         `cd ${workspace} &&`,
         `claude --dangerously-skip-permissions`,
         `--append-system-prompt-file ${instructionsFile}`,
         `--model ${model}`,
-        `2>&1 | tee ${outputLog}`,
       ].join(" ");
 
       await execAsync("screen", [
         "-dmS", sessionName,
+        "-L", "-Logfile", outputLog,
         "bash", "-c", screenCmd,
       ]);
 
@@ -320,6 +370,8 @@ export class CCSpawner {
         stdio: [hasImages ? "pipe" : "ignore", "pipe", "pipe"],
       });
 
+      this.registerSpawn(options.spawnKey, child);
+
       let accumulated = "";
       let stderr = "";
       let lastActivity = Date.now();
@@ -422,6 +474,7 @@ export class CCSpawner {
       child.on("close", (code) => {
         clearInterval(activityCheck);
         clearTimeout(absoluteTimer);
+        this.unregisterSpawn(options.spawnKey, child);
 
         const exitCode = timedOut ? 124 : (code ?? 1);
         const response = finalResult || accumulated || "";
@@ -443,6 +496,7 @@ export class CCSpawner {
       child.on("error", (err) => {
         clearInterval(activityCheck);
         clearTimeout(absoluteTimer);
+        this.unregisterSpawn(options.spawnKey, child);
 
         resolve({
           response: "",
@@ -486,6 +540,8 @@ export class CCSpawner {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
+      this.registerSpawn(options.spawnKey, child);
+
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -508,6 +564,7 @@ export class CCSpawner {
 
       child.on("close", (code) => {
         clearTimeout(timer);
+        this.unregisterSpawn(options.spawnKey, child);
 
         const exitCode = timedOut ? 124 : (code ?? 1);
         const inputChars = message.length + systemPrompt.length;
@@ -526,6 +583,7 @@ export class CCSpawner {
 
       child.on("error", (err) => {
         clearTimeout(timer);
+        this.unregisterSpawn(options.spawnKey, child);
 
         resolve({
           response: "",
@@ -600,6 +658,8 @@ export class CCSpawner {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
+      this.registerSpawn(options.spawnKey, child);
+
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -626,6 +686,7 @@ export class CCSpawner {
 
       child.on("close", (code) => {
         clearTimeout(timer);
+        this.unregisterSpawn(options.spawnKey, child);
 
         const exitCode = timedOut ? 124 : (code ?? 1);
         const response = parseStreamOutput(stdout);
@@ -645,6 +706,7 @@ export class CCSpawner {
 
       child.on("error", (err) => {
         clearTimeout(timer);
+        this.unregisterSpawn(options.spawnKey, child);
 
         resolve({
           response: "",
@@ -657,6 +719,23 @@ export class CCSpawner {
         });
       });
     });
+  }
+
+  /** Kill a tmux/screen async session (used by /stop to cancel async tasks). */
+  async killSession(sessionName: string): Promise<boolean> {
+    const mux = await this.detectMux();
+    if (!mux) return false;
+
+    try {
+      if (mux === "tmux") {
+        await execAsync("tmux", ["kill-session", "-t", sessionName]);
+      } else {
+        await execAsync("screen", ["-S", sessionName, "-X", "quit"]);
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

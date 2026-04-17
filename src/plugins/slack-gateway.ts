@@ -207,6 +207,22 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
         if (!agent) return `Agent "${agentId}" not found.`;
         return `*${agent.name}* ${agent.emoji} is online.\nModel: \`${agent.model}\``;
       }
+      case "/stop": {
+        // Primary /stop handling runs before the channel lock; this branch
+        // exists so the command is recognized as a slash command and does not
+        // fall through to the spawn path.
+        const { syncCancelled, asyncCancelled } = await core.router.cancel(
+          agentId,
+          "slack",
+          channelId,
+        );
+        const parts: string[] = [];
+        if (syncCancelled) parts.push("active prompt");
+        if (asyncCancelled > 0) parts.push(`${asyncCancelled} async task${asyncCancelled === 1 ? "" : "s"}`);
+        return parts.length > 0
+          ? `🛑 Stopped: ${parts.join(" + ")}.`
+          : "Nothing to stop — no active work in this channel.";
+      }
       default:
         return null;
     }
@@ -239,6 +255,31 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
       const text = message.text ?? "";
       const channelId = message.channel;
       const messageTs = message.ts;
+
+      // Early-intercept /stop so it doesn't queue behind the spawn
+      // the user is trying to cancel.
+      if (text.trim().toLowerCase() === "/stop") {
+        if (pluginConfig.allowedUsers.length > 0 && !pluginConfig.allowedUsers.includes(userId)) return;
+        const agentId =
+          core.router.resolveAgent("slack", channelId) ??
+          core.router.resolveAgentByBot("slack", botId);
+        if (!agentId) return;
+
+        const { syncCancelled, asyncCancelled } = await core.router.cancel(
+          agentId,
+          "slack",
+          channelId,
+        );
+        const parts: string[] = [];
+        if (syncCancelled) parts.push("active prompt");
+        if (asyncCancelled > 0) parts.push(`${asyncCancelled} async task${asyncCancelled === 1 ? "" : "s"}`);
+        const reply = parts.length > 0
+          ? `🛑 Stopped: ${parts.join(" + ")}.`
+          : "Nothing to stop — no active work in this channel.";
+        const threadTs = "thread_ts" in message ? message.thread_ts : undefined;
+        await say({ text: reply, thread_ts: threadTs ?? messageTs });
+        return;
+      }
 
       // Per-channel queue — serialize so only one spawn runs at a time
       const lockKey = `${botId}:${channelId}`;

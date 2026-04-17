@@ -248,6 +248,7 @@ describe("route — full pipeline", () => {
       systemPrompt: expect.any(String),
       model: "sonnet",
       allowedTools: ["Read", "Write", "Bash"],
+      spawnKey: expect.any(String),
     });
   });
 
