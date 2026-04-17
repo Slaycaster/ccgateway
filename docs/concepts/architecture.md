@@ -60,6 +60,27 @@ Agent identity comes from workspace files (`CLAUDE.md`, `SOUL.md`, `IDENTITY.md`
 
 Discord and Slack are implemented as plugins. Adding a new gateway means implementing the `CcgPlugin` interface — ccgateway handles routing, sessions, and context for you.
 
+## Security model
+
+Chat messages are **untrusted input** that become prompts an agent acts on. ccgateway exposes two distinct controls — get them right and the system stays safe; get them wrong and you are running a remote shell for strangers.
+
+**Authentication — `allowedUsers`** (per gateway plugin)
+Only users on this list can talk to the agent at all. Everyone not on it is silently ignored. This is your first and hardest gate: if someone isn't on `allowedUsers`, nothing else in ccgateway matters for them.
+
+**Authorization — `allowedTools`** (per agent)
+Once a user is through the gate, their message becomes a prompt. Whatever tools you list in `allowedTools` are the tools the agent can run on their behalf, passed to `claude` as `--allowedTools <tools...>`. A narrow list (`Read, Grep, Glob`) keeps the agent read-only. Including `Bash`, `Write`, or `Edit` means any user on `allowedUsers` can, through social engineering, get the agent to run shell commands, modify files, or overwrite your workspace.
+
+**Permission gating — `dangerouslySkipPermissions`** (per agent)
+When `true`, passes `--dangerously-skip-permissions` to `claude`, skipping all runtime permission prompts. Required in practice for `--print` mode (no TTY to approve things), but only safe when paired with a tightly scoped `allowedTools`. New agents created via `ccg agents add` default to `false`; existing agents and OpenClaw migrations default to `true` for back-compat.
+
+**Async (tmux) spawns** unconditionally pass `--dangerously-skip-permissions` — interactive tmux sessions have no way to answer a permission prompt and would hang forever otherwise. The `allowedTools` scope is still applied. Treat channels that can trigger async work as higher-privilege.
+
+**Practical rules of thumb**
+- Default `allowedTools` to `Read, Grep, Glob` unless you have a concrete reason to widen it
+- Never include `Bash` in `allowedTools` for a channel where `allowedUsers` spans more than trusted individuals
+- Review every `ccg agents add --allowedTools ...` with the threat model in mind: would I trust everyone in `allowedUsers` to ssh into this host and run that tool?
+- Prefer explicit `--dangerously-skip-permissions` only when you have narrowed `allowedTools` accordingly
+
 ## Request lifecycle
 
 1. **Message arrives** — A Discord/Slack plugin receives a message

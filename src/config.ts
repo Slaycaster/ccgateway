@@ -21,6 +21,14 @@ export interface AgentConfig {
   maxConcurrentSessions: number;
   timeoutMs?: number;
   messagingPolicy?: MessagingPolicy;
+  /** When true, pass `--dangerously-skip-permissions` to `claude`, bypassing
+   *  all permission gating. Required in practice for `--print` mode (there's
+   *  no TTY to approve prompts) but risky when combined with broad
+   *  `allowedTools` — chat messages become prompts and the agent acts on
+   *  them without intervention. Narrow `allowedTools` is the primary defense.
+   *  Defaults to `true` when missing (back-compat); new agents created via
+   *  `ccg agents add` default to `false`. */
+  dangerouslySkipPermissions?: boolean;
 }
 
 export interface BindingConfig {

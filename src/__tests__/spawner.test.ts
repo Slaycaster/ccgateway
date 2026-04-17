@@ -631,6 +631,200 @@ describe("spawnStreaming — streaming output", () => {
   });
 });
 
+// ── Tests — allowedTools enforcement ──────────────────────────────────────
+
+describe("spawn — allowedTools enforcement", () => {
+  it("passes --allowedTools with tool names when allowedTools is non-empty", async () => {
+    mockSpawnResult("ok");
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: ["Read", "Grep", "Glob"],
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    const idx = (args as string[]).indexOf("--allowedTools");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect((args as string[]).slice(idx + 1, idx + 4)).toEqual(["Read", "Grep", "Glob"]);
+  });
+
+  it("does NOT pass --allowedTools when allowedTools is empty", async () => {
+    mockSpawnResult("ok");
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).not.toContain("--allowedTools");
+  });
+
+  it("passes --allowedTools in streaming mode", async () => {
+    const child = createMockChild();
+    mockedSpawn.mockReturnValue(child as any);
+
+    const promise = spawner.spawnStreaming({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: ["Read"],
+    });
+
+    process.nextTick(() => {
+      child.stdout.emit("data", Buffer.from('{"type":"result","result":"ok"}\n'));
+      child.emit("close", 0);
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    const idx = (args as string[]).indexOf("--allowedTools");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect((args as string[])[idx + 1]).toBe("Read");
+  });
+
+  it("passes --allowedTools in image (stream-json) mode", async () => {
+    const streamOutput = '{"type":"result","subtype":"success","result":"ok"}\n';
+    mockSpawnResult(streamOutput, "", 0, { withStdin: true });
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "describe",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: ["Read", "Grep"],
+      images: [{ base64: "abc", mediaType: "image/png" }],
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    const idx = (args as string[]).indexOf("--allowedTools");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect((args as string[]).slice(idx + 1, idx + 3)).toEqual(["Read", "Grep"]);
+  });
+});
+
+describe("spawn — dangerouslySkipPermissions gating", () => {
+  it("includes --dangerously-skip-permissions when dangerouslySkipPermissions is true", async () => {
+    mockSpawnResult("ok");
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+      dangerouslySkipPermissions: true,
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).toContain("--dangerously-skip-permissions");
+  });
+
+  it("omits --dangerously-skip-permissions when dangerouslySkipPermissions is false", async () => {
+    mockSpawnResult("ok");
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: ["Read"],
+      dangerouslySkipPermissions: false,
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("defaults to including the flag when field is undefined (back-compat)", async () => {
+    mockSpawnResult("ok");
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: [],
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).toContain("--dangerously-skip-permissions");
+  });
+
+  it("omits the flag in streaming mode when dangerouslySkipPermissions is false", async () => {
+    const child = createMockChild();
+    mockedSpawn.mockReturnValue(child as any);
+
+    const promise = spawner.spawnStreaming({
+      workspace: "/workspace",
+      message: "hi",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: ["Read"],
+      dangerouslySkipPermissions: false,
+    });
+
+    process.nextTick(() => {
+      child.stdout.emit("data", Buffer.from('{"type":"result","result":"ok"}\n'));
+      child.emit("close", 0);
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("omits the flag in image (stream-json) mode when dangerouslySkipPermissions is false", async () => {
+    const streamOutput = '{"type":"result","subtype":"success","result":"ok"}\n';
+    mockSpawnResult(streamOutput, "", 0, { withStdin: true });
+
+    const promise = spawner.spawn({
+      workspace: "/workspace",
+      message: "describe",
+      systemPrompt: "ctx",
+      model: "sonnet",
+      allowedTools: ["Read"],
+      images: [{ base64: "abc", mediaType: "image/png" }],
+      dangerouslySkipPermissions: false,
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const [, args] = mockedSpawn.mock.calls[0];
+    expect(args).not.toContain("--dangerously-skip-permissions");
+  });
+});
+
 // ── Tests — parseStreamOutput ─────────────────────────────────────────────
 
 describe("parseStreamOutput", () => {

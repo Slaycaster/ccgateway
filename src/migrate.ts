@@ -447,6 +447,7 @@ function extractAgents(config: OpenClawConfig, instanceName: string): AgentConfi
       skills: [],
       allowedTools: [...DEFAULT_ALLOWED_TOOLS],
       maxConcurrentSessions: defaultMaxConcurrent,
+      dangerouslySkipPermissions: true,
     }];
   }
 
@@ -466,6 +467,7 @@ function extractAgents(config: OpenClawConfig, instanceName: string): AgentConfi
       skills: [],
       allowedTools: [...DEFAULT_ALLOWED_TOOLS],
       maxConcurrentSessions: defaultMaxConcurrent,
+      dangerouslySkipPermissions: true,
     };
   });
 }
@@ -746,6 +748,7 @@ export async function initNew(): Promise<void> {
         skills: [],
         allowedTools: [...DEFAULT_ALLOWED_TOOLS],
         maxConcurrentSessions: 4,
+        dangerouslySkipPermissions: true,
       },
     ],
     bindings: [],

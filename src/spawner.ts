@@ -29,6 +29,11 @@ export interface SpawnOptions {
   images?: ImageInput[];
   /** Optional key used to register the spawn for external cancellation via `cancel(key)`. */
   spawnKey?: string;
+  /** Whether to pass `--dangerously-skip-permissions` to `claude`.
+   *  Defaults to `true` for back-compat. Set `false` to make the CLI
+   *  honor its default permission gating; combine with `allowedTools`
+   *  for a real allowlist. */
+  dangerouslySkipPermissions?: boolean;
 }
 
 export interface AsyncSpawnOptions {
@@ -38,6 +43,9 @@ export interface AsyncSpawnOptions {
   model: string;
   agentId: string;
   ccgHome: string;
+  /** Scope of tools the async task is allowed to use. Passed through
+   *  to `claude` as `--allowedTools <tools...>`. Empty = CLI default. */
+  allowedTools?: string[];
 }
 
 export interface AsyncSpawnResult {
@@ -182,7 +190,7 @@ export class CCSpawner {
       throw new Error("Neither tmux nor screen is available. Install tmux to use async spawn.");
     }
 
-    const { workspace, message, systemPrompt, model, agentId, ccgHome } = options;
+    const { workspace, message, systemPrompt, model, agentId, ccgHome, allowedTools = [] } = options;
 
     // Session naming: ccg-<agentId>-<shortId>
     const shortId = randomBytes(2).toString("hex");
@@ -202,10 +210,13 @@ export class CCSpawner {
     const outputLog = join(taskDir, "output.log");
     const instructionsFile = join(taskDir, "INSTRUCTIONS.md");
 
+    const allowedToolsArg =
+      allowedTools.length > 0 ? ` --allowedTools ${allowedTools.join(" ")}` : "";
+
     if (mux === "tmux") {
       // Launch tmux session with claude in interactive mode (no pipe — preserves TTY)
       const tmuxCmd = [
-        `claude --dangerously-skip-permissions`,
+        `claude --dangerously-skip-permissions${allowedToolsArg}`,
         `--append-system-prompt-file ${instructionsFile}`,
         `--model ${model}`,
       ].join(" ");
@@ -234,7 +245,7 @@ export class CCSpawner {
       // screen fallback (no pipe — preserves TTY)
       const screenCmd = [
         `cd ${workspace} &&`,
-        `claude --dangerously-skip-permissions`,
+        `claude --dangerously-skip-permissions${allowedToolsArg}`,
         `--append-system-prompt-file ${instructionsFile}`,
         `--model ${model}`,
       ].join(" ");
@@ -336,14 +347,16 @@ export class CCSpawner {
       message,
       systemPrompt,
       model,
+      allowedTools,
+      dangerouslySkipPermissions = true,
       images = [],
     } = options;
 
     const hasImages = images.length > 0;
 
-    const args = [
-      "--print",
-      "--dangerously-skip-permissions",
+    const args: string[] = ["--print"];
+    if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
+    args.push(
       "--no-session-persistence",
       "--output-format",
       "stream-json",
@@ -353,7 +366,8 @@ export class CCSpawner {
       systemPrompt,
       "--model",
       model,
-    ];
+    );
+    if (allowedTools.length > 0) args.push("--allowedTools", ...allowedTools);
 
     if (hasImages) {
       args.push("--input-format", "stream-json");
@@ -519,19 +533,22 @@ export class CCSpawner {
       message,
       systemPrompt,
       model,
+      allowedTools,
+      dangerouslySkipPermissions = true,
       timeoutMs = DEFAULT_TIMEOUT_MS,
     } = options;
 
-    const args = [
-      "--print",
-      "--dangerously-skip-permissions",
+    const args: string[] = ["--print"];
+    if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
+    args.push(
       "-p",
       message,
       "--append-system-prompt",
       systemPrompt,
       "--model",
       model,
-    ];
+    );
+    if (allowedTools.length > 0) args.push("--allowedTools", ...allowedTools);
 
     return new Promise<SpawnResult>((resolve) => {
       const child = spawn("claude", args, {
@@ -606,13 +623,15 @@ export class CCSpawner {
       message,
       systemPrompt,
       model,
+      allowedTools,
+      dangerouslySkipPermissions = true,
       images = [],
       timeoutMs = IMAGE_TIMEOUT_MS,
     } = options;
 
-    const args = [
-      "--print",
-      "--dangerously-skip-permissions",
+    const args: string[] = ["--print"];
+    if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
+    args.push(
       "--input-format",
       "stream-json",
       "--output-format",
@@ -622,7 +641,8 @@ export class CCSpawner {
       systemPrompt,
       "--model",
       model,
-    ];
+    );
+    if (allowedTools.length > 0) args.push("--allowedTools", ...allowedTools);
 
     // Build structured content: images first, then text
     const content: Array<

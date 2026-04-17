@@ -188,6 +188,7 @@ export class MessageRouter {
           model: agent.model,
           agentId,
           ccgHome: getCcgHome(),
+          allowedTools: agent.allowedTools,
         });
 
         // Find the bot ID from the binding for this agent + gateway
@@ -233,6 +234,8 @@ export class MessageRouter {
       systemPrompt,
       model: agent.model,
       allowedTools: agent.allowedTools,
+      // Missing field = true for back-compat; explicit false narrows permissions.
+      dangerouslySkipPermissions: agent.dangerouslySkipPermissions ?? true,
       spawnKey,
       ...(agent.timeoutMs ? { timeoutMs: agent.timeoutMs } : {}),
       ...(images.length > 0 ? { images } : {}),

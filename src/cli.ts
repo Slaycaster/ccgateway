@@ -279,8 +279,13 @@ agentsCmd
   .option("--skills <skills...>", "Skills list", [])
   .option(
     "--allowedTools <tools...>",
-    "Allowed tools list",
-    ["Edit", "Read", "Write", "Bash", "Grep", "Glob"],
+    "Allowed tools list (narrow allowlist recommended; add Bash/Write/Edit only if you trust every user in allowedUsers to run those on the host)",
+    ["Read", "Grep", "Glob"],
+  )
+  .option(
+    "--dangerously-skip-permissions",
+    "Pass --dangerously-skip-permissions to claude. Off by default — agents only run tools in --allowedTools with permission gating honored.",
+    false,
   )
   .option(
     "--maxConcurrentSessions <n>",
@@ -312,6 +317,7 @@ agentsCmd
       skills: opts.skills,
       allowedTools: opts.allowedTools,
       maxConcurrentSessions: parseInt(opts.maxConcurrentSessions, 10),
+      dangerouslySkipPermissions: opts.dangerouslySkipPermissions,
       ...(opts.timeoutMs ? { timeoutMs: parseInt(opts.timeoutMs, 10) } : {}),
     };
 
