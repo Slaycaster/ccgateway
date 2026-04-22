@@ -6,6 +6,8 @@
 
 **An orchestration agent for Claude Code.**
 
+🌐 **[ccgateway.cc](https://ccgateway.cc)** &nbsp;·&nbsp; 📦 **[npm](https://www.npmjs.com/package/ccgateway)**
+
 ccgateway is a single Node.js process that orchestrates multiple Claude Code agents — routing messages between Discord, Slack, and the CLI, assembling context per turn, spawning long-running tasks into tmux, and letting agents talk to each other. No API keys, no third-party harness, no persistent agent processes. Just `claude --print` invoked with the right context, in the right workspace, at the right moment.
 
 ## Why orchestration?
