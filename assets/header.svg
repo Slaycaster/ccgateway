@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="1200" height="440" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#faf9f5"/>
+      <stop offset="1" stop-color="#f2efe6"/>
+    </linearGradient>
+    <linearGradient id="coralFade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#c96442" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#c96442" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#c96442" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#d9d3c5" stroke-width="0.5" opacity="0.35"/>
+    </pattern>
+  </defs>
+
+  <!-- Paper background -->
+  <rect width="1200" height="440" fill="url(#paper)"/>
+  <rect width="1200" height="440" fill="url(#grid)"/>
+
+  <!-- Top eyebrow rule -->
+  <line x1="60" y1="58" x2="180" y2="58" stroke="#c96442" stroke-width="1.5"/>
+  <text x="60" y="48" font-size="11" fill="#c96442" letter-spacing="2">MULTI-AGENT · GATEWAY</text>
+
+  <!-- Wordmark -->
+  <g font-family="Geist, -apple-system, system-ui, sans-serif" font-weight="500">
+    <text x="58" y="140" font-size="86" letter-spacing="-3" fill="#1a1613">
+      <tspan fill="#c96442" font-style="italic">cc</tspan><tspan>gateway</tspan>
+    </text>
+  </g>
+
+  <!-- Tagline -->
+  <text x="60" y="184" font-family="Geist, system-ui, sans-serif" font-size="20" fill="#6b6359" letter-spacing="-0.3">
+    Lean multi-agent gateway sitting on top of your Claude Code CLI.
+  </text>
+
+  <!-- Prompt command -->
+  <g transform="translate(60, 232)" font-size="14">
+    <rect x="-8" y="-20" width="360" height="36" rx="8" fill="#ebe7db" stroke="#d9d3c5"/>
+    <text x="8" y="4" fill="#c96442">$</text>
+    <text x="26" y="4" fill="#1a1613">npm install -g ccgateway</text>
+    <text x="232" y="4" fill="#a8a093">#</text>
+    <text x="244" y="4" fill="#a8a093">ccgateway.cc</text>
+  </g>
+
+  <!-- Meta chips -->
+  <g font-size="11" fill="#6b6359" transform="translate(60, 294)">
+    <g>
+      <rect x="0" y="-14" width="104" height="22" rx="11" fill="#faf9f5" stroke="#d9d3c5"/>
+      <text x="12" y="1">claude --print</text>
+    </g>
+    <g transform="translate(116,0)">
+      <rect x="0" y="-14" width="78" height="22" rx="11" fill="#faf9f5" stroke="#d9d3c5"/>
+      <text x="12" y="1">discord</text>
+    </g>
+    <g transform="translate(206,0)">
+      <rect x="0" y="-14" width="66" height="22" rx="11" fill="#faf9f5" stroke="#d9d3c5"/>
+      <text x="12" y="1">slack</text>
+    </g>
+    <g transform="translate(284,0)">
+      <rect x="0" y="-14" width="62" height="22" rx="11" fill="#faf9f5" stroke="#d9d3c5"/>
+      <text x="12" y="1">tmux</text>
+    </g>
+    <g transform="translate(358,0)">
+      <rect x="0" y="-14" width="78" height="22" rx="11" fill="#f4e4dc" stroke="#c96442"/>
+      <text x="12" y="1" fill="#c96442">no API keys</text>
+    </g>
+  </g>
+
+  <!-- Bottom coral underline accent -->
+  <rect x="60" y="400" width="320" height="1" fill="url(#coralFade)"/>
+
+  <!-- Terminal card on the right -->
+  <g transform="translate(680, 56)">
+    <rect x="0" y="0" width="460" height="328" rx="12" fill="#faf9f5" stroke="#d9d3c5"/>
+    <!-- chrome -->
+    <rect x="0" y="0" width="460" height="32" rx="12" fill="#ebe7db"/>
+    <rect x="0" y="20" width="460" height="12" fill="#ebe7db"/>
+    <circle cx="18" cy="16" r="5" fill="#e26666"/>
+    <circle cx="36" cy="16" r="5" fill="#e0b94a"/>
+    <circle cx="54" cy="16" r="5" fill="#7aaf6a"/>
+    <text x="230" y="20" font-size="11" fill="#a8a093" text-anchor="middle">ccg topology</text>
+    <line x1="0" y1="32" x2="460" y2="32" stroke="#d9d3c5"/>
+
+    <!-- ASCII diagram -->
+    <g font-size="11" fill="#1a1613" transform="translate(18, 54)">
+      <text y="0">┌──────────────────────────────────────────┐</text>
+      <text y="14">│       ccgateway (single process)         │</text>
+      <text y="28">│                                          │</text>
+      <text y="42">│  ┌────────┐ ┌───────┐ ┌─────────────┐    │</text>
+      <text y="56">│  │ Discord│ │ Slack │ │ CLI · future│    │</text>
+      <text y="70">│  └────┬───┘ └───┬───┘ └──────┬──────┘    │</text>
+      <text y="84">│       └─────────┼────────────┘           │</text>
+      <text y="98">│                 ↓                        │</text>
+      <text y="112" fill="#c96442">│         ┌──────────────┐                 │</text>
+      <text y="126" fill="#c96442">│         │    ROUTER    │ channel → agent  │</text>
+      <text y="140" fill="#c96442">│         └──────┬───────┘                 │</text>
+      <text y="154">│                ↓                         │</text>
+      <text y="168">│         ┌──────────────┐                 │</text>
+      <text y="182">│         │ session mgr  │ jsonl           │</text>
+      <text y="196">│         └──────┬───────┘                 │</text>
+      <text y="210" fill="#4a7a3f">│      ┌─────────────────┐                 │</text>
+      <text y="224" fill="#4a7a3f">│      │ context builder │ identity+skills  │</text>
+      <text y="238" fill="#4a7a3f">│      └────────┬────────┘                 │</text>
+      <text y="252">│               ↓ claude --print           │</text>
+      <text y="266">└──────────────────────────────────────────┘</text>
+    </g>
+  </g>
+</svg>

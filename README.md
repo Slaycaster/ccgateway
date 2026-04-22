@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.jpg" alt="ccgateway logo" width="600" />
+  <img src="assets/header.svg" alt="ccgateway — lean multi-agent gateway on top of Claude Code CLI" width="100%" />
 </p>
 
 # ccgateway
