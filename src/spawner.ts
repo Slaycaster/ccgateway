@@ -75,6 +75,11 @@ const MAX_ABSOLUTE_TIMEOUT_MS = 1_800_000; // 30 minutes
  * CLAUDE_CODE_EXECPATH, CLAUDE_CODE_HIDE_ACCOUNT_INFO) so the child process
  * doesn't think it's a nested Claude Code session, which can cause different
  * rate-limit handling or feature restrictions.
+ *
+ * Also strips CLAUDE_CONFIG_DIR — if the daemon was launched from inside a
+ * Claude Code session, that variable points at a per-session config dir that
+ * the parent already has open. Spawned children sharing it can deadlock on
+ * the same session/lock files. Children fall back to ~/.claude.
  */
 function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -83,6 +88,7 @@ function cleanEnv(): NodeJS.ProcessEnv {
   delete env.CLAUDE_CODE_ENTRYPOINT;
   delete env.CLAUDE_CODE_EXECPATH;
   delete env.CLAUDE_CODE_HIDE_ACCOUNT_INFO;
+  delete env.CLAUDE_CONFIG_DIR;
   // Strip npm/node env vars inherited from `npx tsx` that may confuse
   // the child `claude` process into thinking it's part of an npm script
   for (const key of Object.keys(env)) {

@@ -289,11 +289,16 @@ export default function createSlackGateway(pluginConfig: SlackGatewayConfig): Cc
         () => handleSlackMsg(),
       );
       channelLocks.set(lockKey, current);
-      current.finally(() => {
-        if (channelLocks.get(lockKey) === current) {
-          channelLocks.delete(lockKey);
-        }
-      });
+      // .finally() returns a derivative promise that re-throws current's
+      // rejection; suppress the cleanup branch so it can't surface as an
+      // unhandled rejection and crash the daemon (caller awaits `current`).
+      current
+        .finally(() => {
+          if (channelLocks.get(lockKey) === current) {
+            channelLocks.delete(lockKey);
+          }
+        })
+        .catch(() => {});
       return current;
 
       async function handleSlackMsg(): Promise<void> {

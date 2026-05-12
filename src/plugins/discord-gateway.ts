@@ -286,12 +286,17 @@ export default function createDiscordGateway(
 
     channelLocks.set(key, current);
 
-    // Clean up after completion to avoid memory leak
-    current.finally(() => {
-      if (channelLocks.get(key) === current) {
-        channelLocks.delete(key);
-      }
-    });
+    // Clean up after completion to avoid memory leak.
+    // .finally() returns a new promise that re-throws current's rejection;
+    // the caller awaits `current` directly, so suppress the cleanup branch
+    // to prevent a duplicate unhandled rejection from crashing the daemon.
+    current
+      .finally(() => {
+        if (channelLocks.get(key) === current) {
+          channelLocks.delete(key);
+        }
+      })
+      .catch(() => {});
 
     return current;
   }
@@ -398,8 +403,14 @@ export default function createDiscordGateway(
 
       // Check if user is in allowedUsers
       if (!pluginConfig.allowedUsers.includes(msg.author.id)) {
+        logger.info(
+          `discord-gateway: bot "${receivingBotId}" user ${msg.author.tag} (id=${msg.author.id}) NOT in allowedUsers — ignoring`,
+        );
         return;
       }
+      logger.info(
+        `discord-gateway: bot "${receivingBotId}" user ${msg.author.tag} authorized — agent=${agentId}`,
+      );
 
       // Handle slash commands
       const trimmed = msg.content.trim().toLowerCase();
@@ -446,16 +457,31 @@ export default function createDiscordGateway(
 
       // Normalize to IncomingMessage and route
       const incomingMessage = normalizeMessage(msg, agentId);
+      logger.info(`discord-gateway: bot "${receivingBotId}" normalized — sending typing`);
 
-      // Show typing indicator while processing
+      // Show typing indicator while processing.
+      // sendTyping() is fire-and-forget — discord.js's REST client can wedge on
+      // a queued/never-settling promise, which used to hang the whole handler
+      // when awaited. The interval is also unawaited for the same reason.
+      const logTypingErr = (err: unknown) => {
+        const e = err as { code?: number; status?: number; message?: string };
+        logger.warn(
+          `discord-gateway: bot "${receivingBotId}" sendTyping rejected — status=${e.status ?? "?"} code=${e.code ?? "?"} msg=${e.message ?? String(err)}`,
+        );
+      };
       const typingInterval = setInterval(() => {
-        (msg.channel as TextChannel).sendTyping().catch(() => {});
+        (msg.channel as TextChannel).sendTyping().catch(logTypingErr);
       }, 5000);
-      await (msg.channel as TextChannel).sendTyping().catch(() => {});
+      (msg.channel as TextChannel).sendTyping().catch(logTypingErr);
+      logger.info(`discord-gateway: bot "${receivingBotId}" typing fired — sending Thinking...`);
 
       // Send initial "thinking" message that we'll edit with streaming content
       const sentMsg = await (msg.channel as TextChannel).send("Thinking...");
+      logger.info(`discord-gateway: bot "${receivingBotId}" Thinking... sent (${sentMsg.id}) — calling router.route`);
       let lastEditTime = 0;
+
+      let streamEditCount = 0;
+      let streamEditErrCount = 0;
 
       // Throttled streaming callback — edits the message at most every EDIT_THROTTLE_MS
       const onChunk = (accumulated: string) => {
@@ -469,11 +495,24 @@ export default function createDiscordGateway(
             ? accumulated.slice(0, DISCORD_CHAR_LIMIT - 3) + "..."
             : accumulated;
 
-        sentMsg.edit(preview).catch(() => {});
+        streamEditCount++;
+        sentMsg.edit(preview).catch((err: unknown) => {
+          streamEditErrCount++;
+          const e = err as { code?: number; status?: number; message?: string };
+          // Log first three errors verbosely; suppress floods after that
+          if (streamEditErrCount <= 3) {
+            logger.warn(
+              `discord-gateway: bot "${receivingBotId}" stream edit #${streamEditCount} rejected — status=${e.status ?? "?"} code=${e.code ?? "?"} msg=${e.message ?? String(err)}`,
+            );
+          }
+        });
       };
 
       try {
         const response = await core.router.route(incomingMessage, onChunk);
+        logger.info(
+          `discord-gateway: bot "${receivingBotId}" router.route returned (${response.length} chars, stream edits attempted=${streamEditCount}, rejected=${streamEditErrCount})`,
+        );
 
         // Final response: replace initial message + send overflow chunks
         const chunks = splitMessage(response);
